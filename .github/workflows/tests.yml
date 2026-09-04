@@ -1,0 +1,74 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # PHP 8.1 floor — pins to Laravel 10 / Symfony 6 / testbench 8.
+          # prefer-lowest proves the declared lower bounds actually install & pass on 8.1.
+          - php: '8.1'
+            laravel: '^10.0'
+            testbench: '^8.0'
+            dependency-version: prefer-lowest
+          - php: '8.1'
+            laravel: '^10.0'
+            testbench: '^8.0'
+            dependency-version: prefer-stable
+
+          # PHP 8.2 — Laravel 10/11.
+          - php: '8.2'
+            laravel: '^10.0'
+            testbench: '^8.0'
+            dependency-version: prefer-stable
+          - php: '8.2'
+            laravel: '^11.0'
+            testbench: '^9.0'
+            dependency-version: prefer-stable
+
+          # PHP 8.3 — Laravel 11/12.
+          - php: '8.3'
+            laravel: '^11.0'
+            testbench: '^9.0'
+            dependency-version: prefer-stable
+          - php: '8.3'
+            laravel: '^12.0'
+            testbench: '^10.0'
+            dependency-version: prefer-stable
+
+    name: PHP ${{ matrix.php }} - Laravel ${{ matrix.laravel }} - ${{ matrix.dependency-version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, ctype, json
+          coverage: none
+
+      - name: Install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+
+      - name: Constrain dependency versions
+        run: |
+          composer require --no-update \
+            "illuminate/contracts:${{ matrix.laravel }}" \
+            "orchestra/testbench:${{ matrix.testbench }}"
+
+      - name: Install dependencies
+        run: composer update --${{ matrix.dependency-version }} --prefer-dist --no-interaction --no-progress
+
+      - name: Run tests
+        run: vendor/bin/phpunit

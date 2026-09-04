@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+         cacheDirectory=".phpunit.cache"
+         failOnWarning="true">
+    <testsuites>
+        <testsuite name="Unit">
+            <directory>tests/Unit</directory>
+        </testsuite>
+        <testsuite name="Feature">
+            <directory>tests/Feature</directory>
+        </testsuite>
+        <!-- Heavy, opt-in. Run with: phpunit (dash dash)testsuite Performance -->
+        <testsuite name="Performance">
+            <directory>tests/Performance</directory>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory>src</directory>
+        </include>
+    </source>
+    <php>
+        <!-- Testbench boots a real app kernel for the Feature suite; the
+             session/cookie middleware needs an encryption key. -->
+        <env name="APP_KEY" value="base64:AckfSECXIvnK5r28GVIWUAxmbBSjTsmF0v8satOHhHE="/>
+        <!-- Set to a size in GB to enable the very-large-file performance tests. -->
+        <env name="LOG_EXPLORER_PERF_GB" value="0"/>
+        <ini name="memory_limit" value="128M"/>
+    </php>
+</phpunit>

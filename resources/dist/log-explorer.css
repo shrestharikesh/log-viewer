@@ -1,0 +1,31 @@
+/* Minimal styling layered on top of Tailwind utility classes used in the
+   component view. Kept tiny so it composes with any host dashboard theme. */
+
+[x-cloak] { display: none !important; }
+
+.le-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: .25rem;
+    padding: .25rem .5rem;
+    border-radius: .375rem;
+    font-size: .8rem;
+    line-height: 1.1;
+    border: 1px solid rgb(209 213 219);
+    background: #fff;
+    color: rgb(31 41 55);
+    transition: background .12s ease;
+}
+.dark .le-btn { background: rgb(31 41 55); border-color: rgb(55 65 81); color: rgb(229 231 235); }
+.le-btn:hover:not(:disabled) { background: rgb(243 244 246); }
+.dark .le-btn:hover:not(:disabled) { background: rgb(55 65 81); }
+.le-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.le-mode { padding: .25rem .6rem; line-height: 1.4; }
+.le-mode:not(:last-child) { border-right: 1px solid rgb(209 213 219); }
+.dark .le-mode:not(:last-child) { border-right-color: rgb(55 65 81); }
+
+.le-line:target { background: rgba(99, 102, 241, .12); }
+
+/* Comfortable monospace reading for very long lines. */
+.le-root .font-mono { font-feature-settings: "liga" 0; }

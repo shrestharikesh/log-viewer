@@ -1,0 +1,12 @@
+/vendor/
+composer.lock
+.phpunit.cache/
+.phpunit.result.cache
+phpunit.xml.bak
+.idea/
+.vscode/
+*.log
+
+# Local tool session state — not part of the package
+/.claude/
+/.tldr/
