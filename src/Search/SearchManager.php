@@ -8,6 +8,7 @@ use Illuminate\Contracts\Config\Repository as Config;
 use Vendor\LogExplorer\Contracts\LogSourceInterface;
 use Vendor\LogExplorer\Parsing\ParserManager;
 use Vendor\LogExplorer\Reading\LineScanner;
+use Vendor\LogExplorer\Reading\RecordAssembler;
 use Vendor\LogExplorer\Support\LogFile;
 
 /**
@@ -105,18 +106,24 @@ final class SearchManager
 
     private function make(string $name): ?Searcher
     {
+        $records = new RecordAssembler(
+            $this->scanner,
+            $this->parsers,
+            (int) $this->config->get('log-explorer.parsing.max_continuation_lines', 200),
+        );
+
         return match ($name) {
-            'stream' => new StreamSearcher($this->source, $this->scanner, $this->parsers),
+            'stream' => new StreamSearcher($this->source, $records),
             'ripgrep' => new CommandLineSearcher(
                 $this->source,
-                $this->parsers,
+                $records,
                 'ripgrep',
                 (string) $this->config->get('log-explorer.search.ripgrep.binary', 'rg'),
                 (bool) $this->config->get('log-explorer.search.ripgrep.enabled', true),
             ),
             'grep' => new CommandLineSearcher(
                 $this->source,
-                $this->parsers,
+                $records,
                 'grep',
                 (string) $this->config->get('log-explorer.search.grep.binary', 'grep'),
                 (bool) $this->config->get('log-explorer.search.grep.enabled', true),

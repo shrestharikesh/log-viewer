@@ -5,8 +5,7 @@ declare(strict_types=1);
 namespace Vendor\LogExplorer\Search;
 
 use Vendor\LogExplorer\Contracts\LogSourceInterface;
-use Vendor\LogExplorer\Parsing\ParserManager;
-use Vendor\LogExplorer\Reading\LineScanner;
+use Vendor\LogExplorer\Reading\RecordAssembler;
 use Vendor\LogExplorer\Support\ByteCursor;
 use Vendor\LogExplorer\Support\LogFile;
 use Vendor\LogExplorer\Support\LogLine;
@@ -15,16 +14,17 @@ use Vendor\LogExplorer\Support\LogLine;
  * Pure-PHP streaming search. Always available (no external binary) and works
  * against any LogSource, including remote ones with no local path.
  *
- * Reads line-by-line from a byte offset, applies the filters, and stops at the
- * result limit or a wall-clock budget — returning a cursor to resume from. It
- * never holds more than one line plus the (bounded) match buffer in memory.
+ * Reads one whole RECORD at a time (a header plus any continuation lines —
+ * see RecordAssembler) from a byte offset, applies the filters, and stops at
+ * the result limit or a wall-clock budget — returning a cursor to resume
+ * from. It never holds more than one record plus the (bounded) match buffer
+ * in memory.
  */
 final class StreamSearcher implements Searcher
 {
     public function __construct(
         private readonly LogSourceInterface $source,
-        private readonly LineScanner $scanner,
-        private readonly ParserManager $parsers,
+        private readonly RecordAssembler $records,
     ) {
     }
 
@@ -146,30 +146,26 @@ final class StreamSearcher implements Searcher
         $matcher = $this->compileMatcher($criteria);
 
         $offset = max(0, min($criteria->fromOffset, $size));
-        fseek($stream, $offset, SEEK_SET);
 
         $matches = [];
         $timedOut = false;
 
         try {
             while ($offset < $size && count($matches) < $limit) {
-                $line = $this->scanner->readLine($stream);
-                if ($line === null) {
+                // One whole record (header + any folded continuation lines),
+                // not one physical line — see RecordAssembler. The query is
+                // matched against the full folded text, so it can hit
+                // anywhere in the record, not just its header line.
+                $record = $this->records->foldFrom($stream, $offset, $size);
+                if ($record === null) {
                     break;
                 }
-                $end = $offset + $line['consumed'];
 
-                if ($matcher($line['content'])) {
-                    $parsed = $this->parsers->parseLines([
-                        new LogLine($offset, $end, $line['content'], $line['truncated']),
-                    ])[0];
-
-                    if ($this->passesStructuredFilters($parsed, $criteria)) {
-                        $matches[] = $parsed;
-                    }
+                if ($matcher($record->raw) && $this->passesStructuredFilters($record, $criteria)) {
+                    $matches[] = $record;
                 }
 
-                $offset = $end;
+                $offset = $record->endOffset;
 
                 // Re-check the clock periodically so a sparse match over a huge
                 // file still returns control to the user.

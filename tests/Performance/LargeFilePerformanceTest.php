@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Vendor\LogExplorer\Tests\Performance;
 
 use Vendor\LogExplorer\Reading\FileReader;
+use Vendor\LogExplorer\Reading\RecordAssembler;
 use Vendor\LogExplorer\Reading\Tailer;
 use Vendor\LogExplorer\Search\SearchCriteria;
 use Vendor\LogExplorer\Search\StreamSearcher;
@@ -84,7 +85,8 @@ final class LargeFilePerformanceTest extends TestCase
     {
         $this->buildFixture();
         $file = $this->logFile('huge.log');
-        $searcher = new StreamSearcher($this->source(), new \Vendor\LogExplorer\Reading\LineScanner(), $this->parserManager());
+        $records = new RecordAssembler(new \Vendor\LogExplorer\Reading\LineScanner(), $this->parserManager());
+        $searcher = new StreamSearcher($this->source(), $records);
 
         [$result, $used] = $this->measure(fn () => $searcher->search(
             $file,

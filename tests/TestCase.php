@@ -11,6 +11,7 @@ use Vendor\LogExplorer\Parsing\JsonLogParser;
 use Vendor\LogExplorer\Parsing\LaravelLogParser;
 use Vendor\LogExplorer\Parsing\ParserManager;
 use Vendor\LogExplorer\Reading\LineScanner;
+use Vendor\LogExplorer\Reading\RecordAssembler;
 use Vendor\LogExplorer\Sources\LocalLogSource;
 use Vendor\LogExplorer\Support\LogFile;
 use Vendor\LogExplorer\Support\PathValidator;
@@ -77,6 +78,11 @@ abstract class TestCase extends Orchestra
             'laravel' => new LaravelLogParser(),
             'json' => new JsonLogParser(),
         ]);
+    }
+
+    protected function records(): RecordAssembler
+    {
+        return new RecordAssembler($this->scanner(), $this->parserManager());
     }
 
     protected function fixture(string $name): string

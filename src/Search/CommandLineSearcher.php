@@ -8,7 +8,7 @@ use Symfony\Component\Process\Exception\ProcessTimedOutException;
 use Symfony\Component\Process\ExecutableFinder;
 use Symfony\Component\Process\Process;
 use Vendor\LogExplorer\Contracts\LogSourceInterface;
-use Vendor\LogExplorer\Parsing\ParserManager;
+use Vendor\LogExplorer\Reading\RecordAssembler;
 use Vendor\LogExplorer\Support\ByteCursor;
 use Vendor\LogExplorer\Support\LogFile;
 use Vendor\LogExplorer\Support\LogLine;
@@ -21,6 +21,13 @@ use Vendor\LogExplorer\Support\LogLine;
  * from the child process and the process is killed the moment the result limit
  * is reached, so neither the file nor the full result set is ever buffered.
  *
+ * A grep/rg hit is one PHYSICAL line, which may be a record's header or one
+ * of its continuation lines (stack trace, pretty-printed context) — either
+ * way, RecordAssembler reconstructs the whole record it belongs to before it
+ * counts as a match, so a multi-line exception never renders as N separate,
+ * header-less rows. Records are de-duped per file (`seenHeaders`) since two
+ * hits can land in the same record.
+ *
  * SECURITY: arguments are passed as an array to Symfony Process (no shell), so
  * the query string is never interpreted by a shell — no command injection.
  */
@@ -28,7 +35,7 @@ final class CommandLineSearcher implements Searcher
 {
     public function __construct(
         private readonly LogSourceInterface $source,
-        private readonly ParserManager $parsers,
+        private readonly RecordAssembler $records,
         private readonly string $engine,   // 'ripgrep' | 'grep'
         private readonly string $binary,
         private readonly bool $enabled,
@@ -97,7 +104,7 @@ final class CommandLineSearcher implements Searcher
             $path = $this->source->localPath($file);
             if ($path === null) {
                 // Should not happen: available() gates on a resolvable path.
-                $state[$index] = ['file' => $file, 'path' => null, 'size' => 0, 'mtime' => 0, 'matches' => [], 'lastOffset' => $criteria->fromOffset];
+                $state[$index] = ['file' => $file, 'path' => null, 'size' => 0, 'mtime' => 0, 'matches' => [], 'lastOffset' => $criteria->fromOffset, 'stream' => null, 'seenHeaders' => []];
 
                 continue;
             }
@@ -110,6 +117,8 @@ final class CommandLineSearcher implements Searcher
                 'mtime' => $this->source->lastModified($file),
                 'matches' => [],
                 'lastOffset' => $criteria->fromOffset,
+                'stream' => null,
+                'seenHeaders' => [],
             ];
         }
 
@@ -150,24 +159,45 @@ final class CommandLineSearcher implements Searcher
                         [$index, $rawLine] = $attributed;
                     }
 
-                    $parsed = $this->parseOutputLine($rawLine, $state[$index]['size']);
-                    if ($parsed === null) {
+                    $hit = $this->parseOutputLine($rawLine, $state[$index]['size']);
+                    if ($hit === null) {
                         continue;
                     }
 
-                    // Resume support: skip anything before the requested offset.
-                    if ($parsed->offset < $criteria->fromOffset) {
+                    // The hit may be anywhere inside a multi-line record (its
+                    // header, or one of its continuation lines) — reconstruct
+                    // the whole record it belongs to before treating it as a
+                    // match, so a stack trace never surfaces as N separate rows.
+                    $record = $this->records->readRecordAt(
+                        $this->streamFor($state, $index),
+                        $hit->offset,
+                        $state[$index]['size'],
+                    );
+                    if ($record === null) {
                         continue;
                     }
 
-                    $logLine = $this->parsers->parseLines([$parsed])[0];
-
-                    if (! $this->passesStructuredFilters($logLine, $criteria)) {
+                    // Resume support: skip anything whose record already ended
+                    // at or before the requested offset (reported on an
+                    // earlier page). Keyed off the record's own start, not the
+                    // raw hit, since reconstruction can walk backward past it.
+                    if ($record->offset < $criteria->fromOffset) {
                         continue;
                     }
 
-                    $state[$index]['matches'][] = $logLine;
-                    $state[$index]['lastOffset'] = $parsed->endOffset;
+                    // Two hits (e.g. the header and a stack frame) can resolve
+                    // to the same record — count it once.
+                    if (isset($state[$index]['seenHeaders'][$record->offset])) {
+                        continue;
+                    }
+
+                    if (! $this->passesStructuredFilters($record, $criteria)) {
+                        continue;
+                    }
+
+                    $state[$index]['seenHeaders'][$record->offset] = true;
+                    $state[$index]['matches'][] = $record;
+                    $state[$index]['lastOffset'] = $record->endOffset;
                     $total++;
 
                     if ($total >= $criteria->limit) {
@@ -180,6 +210,12 @@ final class CommandLineSearcher implements Searcher
             // The shared wall-clock budget is spent: keep what we have and tell
             // the caller the batch is resumable rather than blowing up.
             $timedOut = true;
+        } finally {
+            foreach ($state as $entry) {
+                if ($entry['stream'] !== null) {
+                    fclose($entry['stream']);
+                }
+            }
         }
 
         if ($process->isRunning()) {
@@ -210,6 +246,23 @@ final class CommandLineSearcher implements Searcher
         }
 
         return $results;
+    }
+
+    /**
+     * Lazily open (and cache in $state) the read handle used to reconstruct
+     * full records around this file's hits. Most files in a batch never have
+     * a hit, so this avoids opening a stream per file up front.
+     *
+     * @param  array<int,array{file:LogFile,stream:resource|null,...}>  $state
+     * @return resource
+     */
+    private function streamFor(array &$state, int $index)
+    {
+        if ($state[$index]['stream'] === null) {
+            $state[$index]['stream'] = $this->source->reader($state[$index]['file']);
+        }
+
+        return $state[$index]['stream'];
     }
 
     /**

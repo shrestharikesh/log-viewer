@@ -226,6 +226,13 @@ return [
 
         // Treat lines that no parser claims as plain text (vs. dropping them).
         'fallback_to_plain' => true,
+
+        // A multi-line record (a header plus stack-trace / pretty-printed
+        // context lines that follow it) is folded into a single match, up to
+        // this many continuation lines. Beyond the cap, folding stops and the
+        // remainder is read as further record(s) — bounds memory/time against
+        // a pathological single log call with no next header for a long time.
+        'max_continuation_lines' => 200,
     ],
 
     /*

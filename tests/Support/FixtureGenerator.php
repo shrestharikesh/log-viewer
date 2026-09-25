@@ -54,6 +54,32 @@ final class FixtureGenerator
     }
 
     /**
+     * A Laravel/Monolog-style multi-line exception record: a header line
+     * whose message is followed by "[stacktrace]" and N "#i ..." frames —
+     * exactly how `Log::critical($msg, ['ex' => $e])` renders in practice.
+     * Surrounded by ordinary single-line entries so tests can assert the
+     * exception folds into ONE match without swallowing its neighbours.
+     */
+    public static function withStackTrace(string $path, int $frames = 3): void
+    {
+        $h = fopen($path, 'wb');
+
+        fwrite($h, "[2026-01-01 10:00:00] testing.INFO: before the exception {\"i\":0}\n");
+
+        fwrite($h, '[2026-01-01 10:00:01] testing.CRITICAL: Something failed badly {"ex":"[object] (RuntimeException(code: 0): Something failed badly at /app/Job.php:42)'."\n");
+        fwrite($h, "[stacktrace]\n");
+        for ($i = 0; $i < $frames; $i++) {
+            fwrite($h, "#{$i} /app/vendor/framework/Handler.php({$i}0): Framework\\Handler->handle()\n");
+        }
+        fwrite($h, "#{$frames} {main}\n");
+        fwrite($h, "\"}\n");
+
+        fwrite($h, "[2026-01-01 10:00:02] testing.INFO: after the exception {\"i\":1}\n");
+
+        fclose($h);
+    }
+
+    /**
      * Write a file of at least $targetBytes using identifiable, fixed-format
      * lines. Returns [bytesWritten, lineCount].
      *

@@ -6,6 +6,7 @@ namespace Vendor\LogExplorer\Tests\Unit;
 
 use Illuminate\Config\Repository;
 use Symfony\Component\Process\ExecutableFinder;
+use Vendor\LogExplorer\Reading\RecordAssembler;
 use Vendor\LogExplorer\Search\CommandLineSearcher;
 use Vendor\LogExplorer\Search\FileSearchResult;
 use Vendor\LogExplorer\Search\SearchCriteria;
@@ -113,7 +114,7 @@ final class MultiFileSearchTest extends TestCase
 
     public function test_command_line_searcher_builds_one_invocation_for_all_files(): void
     {
-        $searcher = new CommandLineSearcher($this->source(), $this->parserManager(), 'grep', 'grep', true);
+        $searcher = new CommandLineSearcher($this->source(), $this->records(), 'grep', 'grep', true);
 
         $method = (new \ReflectionClass($searcher))->getMethod('buildCommand');
         $method->setAccessible(true);
@@ -136,7 +137,7 @@ final class MultiFileSearchTest extends TestCase
 
     public function test_ripgrep_multi_file_invocation_requests_filenames(): void
     {
-        $searcher = new CommandLineSearcher($this->source(), $this->parserManager(), 'ripgrep', 'rg', true);
+        $searcher = new CommandLineSearcher($this->source(), $this->records(), 'ripgrep', 'rg', true);
 
         $method = (new \ReflectionClass($searcher))->getMethod('buildCommand');
         $method->setAccessible(true);
