@@ -6,7 +6,6 @@ namespace Vendor\LogExplorer\Search;
 
 use Vendor\LogExplorer\Contracts\LogSourceInterface;
 use Vendor\LogExplorer\Reading\RecordAssembler;
-use Vendor\LogExplorer\Support\ByteCursor;
 use Vendor\LogExplorer\Support\LogFile;
 use Vendor\LogExplorer\Support\LogLine;
 
@@ -16,15 +15,18 @@ use Vendor\LogExplorer\Support\LogLine;
  *
  * Reads one whole RECORD at a time (a header plus any continuation lines —
  * see RecordAssembler) from a byte offset, applies the filters, and stops at
- * the result limit or a wall-clock budget — returning a cursor to resume
- * from. It never holds more than one record plus the (bounded) match buffer
- * in memory.
+ * the end of its byte range, the result limit or a wall-clock budget. It
+ * never holds more than one record plus the (bounded) match buffer in memory.
+ *
+ * Range selection (time seek, cursor, newest-first windows) and the shared
+ * limit/timeout budget live in SearchRunner; this class only scans a range.
  */
-final class StreamSearcher implements Searcher
+final class StreamSearcher implements RangeScanner
 {
     public function __construct(
         private readonly LogSourceInterface $source,
         private readonly RecordAssembler $records,
+        private readonly ScanOptions $options = new ScanOptions(),
     ) {
     }
 
@@ -40,24 +42,12 @@ final class StreamSearcher implements Searcher
 
     public function search(LogFile $file, SearchCriteria $criteria): SearchResult
     {
-        $scan = $this->scan($file, $criteria, $criteria->limit, microtime(true) + $criteria->timeout);
-
-        $complete = ! $scan['timedOut'] && $scan['offset'] >= $scan['size'] && count($scan['matches']) < $criteria->limit;
-
-        return new SearchResult(
-            matches: $scan['matches'],
-            nextCursor: $complete ? null : (new ByteCursor($scan['offset'], $scan['fingerprint']))->encode(),
-            complete: $complete,
-            engine: 'stream',
-            truncated: count($scan['matches']) >= $criteria->limit,
-        );
+        return $this->searchMany([$file], $criteria)[0]->result;
     }
 
     /**
-     * There is no multi-file streaming primitive in PHP, so the batch is simply
-     * a loop — but over ONE shared budget: each file is capped at whatever is
-     * left of the limit, and the wall-clock deadline is computed once for the
-     * whole batch. Files after the budget runs out are not opened at all.
+     * There is no multi-file streaming primitive in PHP, so the batch is a
+     * loop, over ONE shared budget (see SearchRunner).
      *
      * @param  LogFile[]  $files
      * @return FileSearchResult[]
@@ -68,123 +58,70 @@ final class StreamSearcher implements Searcher
             return [];
         }
 
-        $deadline = microtime(true) + $criteria->timeout;
-        $remaining = $criteria->limit;
-        $stopped = false;
-
-        $results = [];
-
-        foreach (array_values($files) as $file) {
-            if ($stopped || $remaining <= 0 || microtime(true) > $deadline) {
-                $stopped = true;
-
-                // Never scanned: report it as resumable from the requested
-                // offset rather than pretending it had no matches.
-                $results[] = new FileSearchResult(
-                    file: $file,
-                    result: new SearchResult(
-                        matches: [],
-                        nextCursor: (new ByteCursor(
-                            $criteria->fromOffset,
-                            ByteCursor::fingerprint($this->source->size($file), $this->source->lastModified($file)),
-                        ))->encode(),
-                        complete: false,
-                        engine: 'stream',
-                        truncated: $remaining <= 0,
-                    ),
-                );
-
-                continue;
-            }
-
-            $budget = $remaining;
-            $scan = $this->scan($file, $criteria, $budget, $deadline);
-
-            $matched = count($scan['matches']);
-            $remaining -= $matched;
-
-            // This file consumed the entire remaining budget, so there may well
-            // be more matches in it (and in every file after it).
-            $hitLimit = $matched >= $budget;
-
-            if ($scan['timedOut'] || $hitLimit) {
-                $stopped = true;
-            }
-
-            $complete = ! $scan['timedOut'] && ! $hitLimit && $scan['offset'] >= $scan['size'];
-
-            $results[] = new FileSearchResult(
-                file: $file,
-                result: new SearchResult(
-                    matches: $scan['matches'],
-                    nextCursor: $complete ? null : (new ByteCursor($scan['offset'], $scan['fingerprint']))->encode(),
-                    complete: $complete,
-                    engine: 'stream',
-                    truncated: $hitLimit,
-                ),
-            );
-        }
-
-        return $results;
+        return (new SearchRunner($this, $this->source, $this->records, $this->options))
+            ->search(array_values($files), $criteria);
     }
 
-    /**
-     * Scan one file for up to $limit matches, giving up at $deadline.
-     *
-     * Shared by the single-file and batch paths so the matching, filtering and
-     * memory characteristics are identical either way.
-     *
-     * @return array{matches:LogLine[], offset:int, size:int, timedOut:bool, fingerprint:string}
-     */
-    private function scan(LogFile $file, SearchCriteria $criteria, int $limit, float $deadline): array
-    {
+    public function scanRange(
+        LogFile $file,
+        SearchCriteria $criteria,
+        int $start,
+        int $end,
+        float $deadline,
+        callable $onMatch,
+        bool $headersOnly = false,
+    ): ScanOutcome {
         $size = $this->source->size($file);
-        $mtime = $this->source->lastModified($file);
-        $fingerprint = ByteCursor::fingerprint($size, $mtime);
+        $end = min($end, $size);
+
+        if ($start >= $end) {
+            return ScanOutcome::completed(max($start, $end));
+        }
 
         $stream = $this->source->reader($file);
         $matcher = $this->compileMatcher($criteria);
-
-        $offset = max(0, min($criteria->fromOffset, $size));
-
-        $matches = [];
-        $timedOut = false;
+        $offset = $start;
+        $scanned = 0;
 
         try {
-            while ($offset < $size && count($matches) < $limit) {
+            // A start inside a record (a hand-made cursor) must not turn the
+            // rest of that record into a header-less orphan match: skip to
+            // the record's end, the same "header in [start, end)" rule the
+            // CLI engines apply.
+            $head = $this->records->recordStartContaining($stream, $start, $size);
+            if ($head < $start) {
+                $offset = max($start, $this->records->foldFrom($stream, $head, $size)?->endOffset ?? $start);
+            }
+
+            while ($offset < $end) {
+                // Check the clock every 256 records, so a sparse match over a
+                // huge range still returns control to the user.
+                if (($scanned++ & 0xFF) === 0 && microtime(true) >= $deadline) {
+                    return new ScanOutcome($offset, false, true);
+                }
+
                 // One whole record (header + any folded continuation lines),
-                // not one physical line — see RecordAssembler. The query is
-                // matched against the full folded text, so it can hit
-                // anywhere in the record, not just its header line.
-                $record = $this->records->foldFrom($stream, $offset, $size);
+                // not one physical line, so the query can hit anywhere in it.
+                // Bounded by $end, not $size: a fold never runs into the next
+                // window/page (see CommandLineSearcher::scanRange).
+                $record = $this->records->foldFrom($stream, $offset, $end);
                 if ($record === null) {
                     break;
                 }
 
-                if ($matcher($record->raw) && $this->passesStructuredFilters($record, $criteria)) {
-                    $matches[] = $record;
-                }
-
                 $offset = $record->endOffset;
 
-                // Re-check the clock periodically so a sparse match over a huge
-                // file still returns control to the user.
-                if ((count($matches) & 0x3F) === 0 && microtime(true) > $deadline) {
-                    $timedOut = true;
-                    break;
+                if ($matcher($record->raw) && $criteria->passesStructuredFilters($record)) {
+                    if ($onMatch($record) === false) {
+                        return new ScanOutcome($offset, false);
+                    }
                 }
             }
         } finally {
             fclose($stream);
         }
 
-        return [
-            'matches' => $matches,
-            'offset' => $offset,
-            'size' => $size,
-            'timedOut' => $timedOut,
-            'fingerprint' => $fingerprint,
-        ];
+        return ScanOutcome::completed($end);
     }
 
     /**
@@ -219,30 +156,5 @@ final class StreamSearcher implements Searcher
         return $criteria->caseSensitive
             ? static fn (string $line): bool => str_contains($line, $needle)
             : static fn (string $line): bool => stripos($line, $needle) !== false;
-    }
-
-    private function passesStructuredFilters(LogLine $line, SearchCriteria $criteria): bool
-    {
-        $parsed = $line->parsed;
-
-        if ($criteria->level !== null && $criteria->level !== '') {
-            if ($parsed?->level === null || strcasecmp($parsed->level, $criteria->level) !== 0) {
-                return false;
-            }
-        }
-
-        if (($criteria->dateFrom !== null || $criteria->dateTo !== null) && $parsed?->datetime !== null) {
-            $ts = strtotime($parsed->datetime);
-            if ($ts !== false) {
-                if ($criteria->dateFrom !== null && $ts < (int) strtotime($criteria->dateFrom)) {
-                    return false;
-                }
-                if ($criteria->dateTo !== null && $ts > (int) strtotime($criteria->dateTo)) {
-                    return false;
-                }
-            }
-        }
-
-        return true;
     }
 }

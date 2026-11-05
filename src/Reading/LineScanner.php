@@ -143,6 +143,31 @@ final class LineScanner
     }
 
     /**
+     * Start of the line that contains byte $offset, which may be any byte
+     * (not necessarily a line boundary). Scans backward in chunks to the
+     * nearest "\n" before $offset; returns $offset itself when it already is
+     * a boundary.
+     */
+    public function lineStartAt($stream, int $offset): int
+    {
+        $pos = $offset;
+
+        while ($pos > 0) {
+            $read = min($this->chunkSize, $pos);
+            $pos -= $read;
+            fseek($stream, $pos, SEEK_SET);
+            $chunk = (string) fread($stream, $read);
+
+            $nl = strrpos($chunk, "\n");
+            if ($nl !== false) {
+                return $pos + $nl + 1;
+            }
+        }
+
+        return 0;
+    }
+
+    /**
      * Like findOffsetBefore() but anchored at EOF, correcting for whether the
      * file ends with a newline. Returns the byte offset where reading forward
      * yields the last $lines lines of the file.

@@ -31,6 +31,77 @@ final class FixtureGenerator
         return $bytes;
     }
 
+    /**
+     * Laravel records with CONTROLLED timestamps, one per entry of
+     * $timestamps, written in the given order, so a test can write
+     * deliberately skewed (out-of-order) lines. Record i reads
+     * "Event number i" at level LEVELS[i % 5]; every $traceEvery-th record
+     * (when > 0) carries a 3-frame stack trace mentioning "Handler.php".
+     *
+     * @param  iterable<int>  $timestamps  unix timestamps, rendered in PHP's default timezone
+     * @return int[]  the header byte offset of each record, by index
+     */
+    public static function timed(string $path, iterable $timestamps, int $traceEvery = 0): array
+    {
+        $levels = ['INFO', 'DEBUG', 'WARNING', 'ERROR', 'CRITICAL'];
+        $h = fopen($path, 'wb');
+        $offsets = [];
+        $bytes = 0;
+
+        foreach ($timestamps as $i => $ts) {
+            $offsets[$i] = $bytes;
+            $record = sprintf(
+                "[%s] testing.%s: Event number %d {\"i\":%d}\n",
+                date('Y-m-d H:i:s', $ts), $levels[$i % count($levels)], $i, $i,
+            );
+
+            if ($traceEvery > 0 && $i % $traceEvery === 0) {
+                $record .= "[stacktrace]\n";
+                for ($f = 0; $f < 3; $f++) {
+                    $record .= "#{$f} /app/vendor/framework/Handler.php({$f}0): Framework\\Handler->handle({$i})\n";
+                }
+                $record .= "#3 {main}\n";
+            }
+
+            $bytes += fwrite($h, $record);
+        }
+
+        fclose($h);
+
+        return $offsets;
+    }
+
+    /**
+     * A time-ordered file of at least $targetBytes: $perSecond records per
+     * second starting at $startTs, every 10th one an ERROR. Streams writes,
+     * so it is flat-memory even at many GB.
+     *
+     * @return array{0:int,1:int,2:int}  [bytesWritten, recordCount, lastTimestamp]
+     */
+    public static function timedOfSize(string $path, int $targetBytes, int $startTs, int $perSecond = 10): array
+    {
+        $h = fopen($path, 'wb');
+        $bytes = 0;
+        $i = 0;
+        $ts = $startTs;
+        $stamp = date('Y-m-d H:i:s', $ts);
+
+        while ($bytes < $targetBytes) {
+            if ($i > 0 && $i % $perSecond === 0) {
+                $ts++;
+                $stamp = date('Y-m-d H:i:s', $ts);
+            }
+
+            $level = $i % 10 === 0 ? 'ERROR' : 'INFO';
+            $bytes += fwrite($h, "[{$stamp}] testing.{$level}: timed line {$i} shop-".($i % 97)." padding-padding\n");
+            $i++;
+        }
+
+        fclose($h);
+
+        return [$bytes, $i, $ts];
+    }
+
     public static function jsonLines(string $path, int $count): int
     {
         $levels = ['info', 'debug', 'warning', 'error'];

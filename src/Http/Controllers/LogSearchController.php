@@ -6,38 +6,39 @@ namespace Vendor\LogExplorer\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Vendor\LogExplorer\Exceptions\SearchFailedException;
+use Vendor\LogExplorer\Http\Controllers\Concerns\BuildsSearchCriteria;
 use Vendor\LogExplorer\Http\Controllers\Concerns\ResolvesLogFile;
-use Vendor\LogExplorer\Search\SearchCriteria;
 use Vendor\LogExplorer\Search\SearchManager;
-use Vendor\LogExplorer\Support\ByteCursor;
 
 /**
  * GET {prefix}/api/search — streamed search across a (possibly huge) file.
  *
- * Query: file, q, regex, case, level, from, to, cursor, limit
+ * Query: file, q, regex, case, level, from, to, cursor, limit,
+ *        direction (forward = oldest first, default | backward = newest first)
+ *
+ * `from`/`to` are turned into a byte range by binary search before scanning,
+ * so a recent time window costs the window, not the file.
  */
 final class LogSearchController
 {
+    use BuildsSearchCriteria;
     use ResolvesLogFile;
 
     public function __invoke(Request $request, SearchManager $search): JsonResponse
     {
         $file = $this->resolveFile($request);
 
-        $fromOffset = ByteCursor::decode($request->query('cursor'))?->offset ?? 0;
-
-        $criteria = new SearchCriteria(
-            query: (string) $request->query('q', ''),
-            regex: $request->boolean('regex'),
-            caseSensitive: $request->boolean('case'),
-            level: $request->query('level') ?: null,
-            dateFrom: $request->query('from') ?: null,
-            dateTo: $request->query('to') ?: null,
-            limit: min($this->clampLimit($request), (int) config('log-explorer.search.max_results', 1000)),
-            fromOffset: $fromOffset,
-            timeout: (int) config('log-explorer.search.timeout', 30),
+        $criteria = $this->criteriaFrom(
+            $request,
+            min($this->clampLimit($request), (int) config('log-explorer.search.max_results', 1000)),
         );
 
-        return response()->json($search->search($file, $criteria));
+        try {
+            return response()->json($search->search($file, $criteria));
+        } catch (SearchFailedException $e) {
+            // Usually an invalid regex for the engine's dialect.
+            abort(422, $e->getMessage());
+        }
     }
 }

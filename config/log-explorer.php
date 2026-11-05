@@ -161,6 +161,31 @@ return [
 
         // Wall-clock budget for a single search, in seconds.
         'timeout' => 30,
+
+        // Turn from/to date filters into a byte range by binary search over
+        // the file's record timestamps, so "since 14:00" starts reading at
+        // 14:00 instead of byte 0. Assumes files are appended in time order
+        // (true of Laravel logs). Disable for files that are not.
+        'time_seek' => true,
+
+        // Seconds the seeked range is widened by on each side, to absorb
+        // clock skew between workers writing to the same file. The exact
+        // date filter still runs on every record.
+        'time_seek_margin' => 300,
+
+        // Newest-first (direction=backward) search scans windows back from the
+        // end of the file: 1 MB first, doubling up to this many bytes. A page
+        // costs at most about one full window.
+        'backward_window' => 64 * 1024 * 1024,
+
+        // Run rg/grep under `nice -n N` so a big search doesn't starve the
+        // app. false disables.
+        'nice' => 10,
+
+        // On Linux, also run rg/grep in the idle I/O class (`ionice -c3`).
+        // On a disk that is never idle this can slow searches down a lot; set
+        // false if searches start timing out.
+        'ionice' => true,
     ],
 
     /*

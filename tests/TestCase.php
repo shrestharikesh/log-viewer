@@ -4,14 +4,17 @@ declare(strict_types=1);
 
 namespace Vendor\LogExplorer\Tests;
 
+use Illuminate\Config\Repository;
 use Illuminate\Support\Facades\Gate;
 use Orchestra\Testbench\TestCase as Orchestra;
+use Symfony\Component\Process\ExecutableFinder;
 use Vendor\LogExplorer\LogExplorerServiceProvider;
 use Vendor\LogExplorer\Parsing\JsonLogParser;
 use Vendor\LogExplorer\Parsing\LaravelLogParser;
 use Vendor\LogExplorer\Parsing\ParserManager;
 use Vendor\LogExplorer\Reading\LineScanner;
 use Vendor\LogExplorer\Reading\RecordAssembler;
+use Vendor\LogExplorer\Search\SearchManager;
 use Vendor\LogExplorer\Sources\LocalLogSource;
 use Vendor\LogExplorer\Support\LogFile;
 use Vendor\LogExplorer\Support\PathValidator;
@@ -83,6 +86,46 @@ abstract class TestCase extends Orchestra
     protected function records(): RecordAssembler
     {
         return new RecordAssembler($this->scanner(), $this->parserManager());
+    }
+
+    /**
+     * A SearchManager forced to one engine mode, with optional overrides of
+     * the `log-explorer.search` config (time_seek, backward_window, ...).
+     */
+    protected function searchManager(string $mode = 'auto', array $search = []): SearchManager
+    {
+        $config = new Repository([
+            'log-explorer' => [
+                'search' => array_replace([
+                    'mode' => $mode,
+                    'ripgrep' => ['binary' => 'rg', 'enabled' => true],
+                    'grep' => ['binary' => 'grep', 'enabled' => true],
+                ], $search),
+            ],
+        ]);
+
+        return new SearchManager($this->source(), $this->scanner(), $this->parserManager(), $config);
+    }
+
+    /**
+     * The engine modes runnable on this host: always 'stream', plus 'grep'
+     * and 'ripgrep' when their binaries exist.
+     *
+     * @return string[]
+     */
+    protected function availableEngines(): array
+    {
+        $finder = new ExecutableFinder();
+        $engines = ['stream'];
+
+        if ($finder->find('grep') !== null) {
+            $engines[] = 'grep';
+        }
+        if ($finder->find('rg', null, ['/usr/local/bin', '/opt/homebrew/bin']) !== null) {
+            $engines[] = 'ripgrep';
+        }
+
+        return $engines;
     }
 
     protected function fixture(string $name): string

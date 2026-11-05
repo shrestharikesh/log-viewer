@@ -91,6 +91,39 @@ final class RecordAssembler
         return $this->foldFrom($stream, $this->locateHeaderOffset($stream, $lineOffset, $size), $size);
     }
 
+    /**
+     * Offset of the header of the record that contains byte $offset (any
+     * byte, not necessarily a line start). Used to align range boundaries so
+     * a record is never split between two scans. Always <= $offset.
+     *
+     * @param  resource  $stream  seekable; this seeks it itself
+     */
+    public function recordStartContaining($stream, int $offset, int $size): int
+    {
+        if ($offset <= 0) {
+            return 0;
+        }
+
+        return $this->locateHeaderOffset($stream, $this->scanner->lineStartAt($stream, min($offset, $size)), $size);
+    }
+
+    /**
+     * Whether the line is a record header (some parser claims it).
+     */
+    public function isHeader(string $line): bool
+    {
+        return $this->parsers->first($line) !== null;
+    }
+
+    /**
+     * Parse one physical line known to be a record header (e.g. a grep hit)
+     * into a LogLine, without touching the stream.
+     */
+    public function parseHeaderLine(int $offset, int $endOffset, string $content): LogLine
+    {
+        return $this->parsers->parseLines([new LogLine($offset, $endOffset, $content)])[0];
+    }
+
     private function locateHeaderOffset($stream, int $lineOffset, int $size): int
     {
         if ($lineOffset >= $size) {

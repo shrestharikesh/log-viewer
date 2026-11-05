@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Illuminate\Support\Facades\Route;
+use Vendor\LogExplorer\Http\Controllers\LogCountController;
 use Vendor\LogExplorer\Http\Controllers\LogDownloadController;
 use Vendor\LogExplorer\Http\Controllers\LogFileController;
 use Vendor\LogExplorer\Http\Controllers\LogSearchController;
@@ -32,6 +33,7 @@ Route::prefix('api')->name('api.')->group(function (): void {
     Route::get('view', LogViewController::class)->name('view');
     Route::get('tail', LogTailController::class)->name('tail');
     Route::get('search', LogSearchController::class)->name('search');
+    Route::get('count', LogCountController::class)->name('count');
     Route::get('stream', LogStreamController::class)->name('stream');
     Route::get('download', LogDownloadController::class)->name('download');
 });
