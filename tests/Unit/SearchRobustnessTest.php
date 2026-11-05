@@ -149,6 +149,122 @@ final class SearchRobustnessTest extends TestCase
         $this->assertGreaterThan(0, ByteCursor::decode($count->files[0]['cursor'])->offset);
     }
 
+    public function test_a_multi_file_cli_search_that_times_out_before_its_first_match_still_advances_every_call(): void
+    {
+        $names = ['a.log', 'b.log', 'c.log'];
+        $files = [];
+        foreach ($names as $name) {
+            $text = '';
+            for ($i = 0; $i < 300; $i++) {
+                $text .= "[2026-11-05 10:00:00] local.INFO: {$name} line {$i}\n";
+            }
+            file_put_contents($this->fixture($name), $text);
+            $files[] = $this->logFile($name);
+        }
+
+        // Pieces start at 2000 bytes; the engine stalls on more than 6000
+        // bytes of input (stdin or file arguments), so a 13 KB file, or all
+        // three at once, never finishes inside the 1 s budget.
+        foreach ($this->stallingEngines(6000, new ScanOptions(forwardPiece: 2000)) as $label => $engine) {
+            // A client following next_cursor per file. Files that sit at the
+            // same cursor go in one call, so every call that starts a file
+            // from 0 alongside another is a multi-file, whole-file search.
+            $cursors = array_fill(0, count($files), 0);
+            $found = array_fill(0, count($files), []);
+            $calls = 0;
+            $multiFileCalls = 0;
+
+            while (($first = array_key_first(array_filter($cursors, static fn ($c) => $c !== null))) !== null && $calls < 30) {
+                $offset = $cursors[$first];
+                $group = array_keys(array_filter($cursors, static fn ($c) => $c === $offset));
+
+                $results = $engine->searchMany(
+                    array_map(static fn (int $i) => $files[$i], $group),
+                    new SearchCriteria(query: 'line 299', limit: 10, fromOffset: $offset, timeout: 1),
+                );
+                $calls++;
+                $multiFileCalls += count($group) > 1 ? 1 : 0;
+
+                foreach ($group as $k => $i) {
+                    $page = $results[$k]->result;
+                    $found[$i] = [...$found[$i], ...$page->matches];
+                    $cursors[$i] = $page->nextCursor === null ? null : ByteCursor::decode($page->nextCursor)->offset;
+                }
+
+                if ($cursors[$first] !== null) {
+                    $this->assertGreaterThan($offset, $cursors[$first], "{$label}: call {$calls} must move {$names[$first]}'s cursor");
+                }
+            }
+
+            $this->assertSame(array_fill(0, count($files), null), $cursors, "{$label}: paging must finish");
+            $this->assertGreaterThan(1, $multiFileCalls, "{$label}: the multi-file path must have been exercised");
+            $this->assertGreaterThan(count($files), $calls, "{$label}: the slow engine must have timed out");
+
+            foreach ($names as $i => $name) {
+                $this->assertCount(1, $found[$i], "{$label}: {$name}");
+                $this->assertStringContainsString("{$name} line 299", $found[$i][0]->raw, $label);
+            }
+        }
+    }
+
+    public function test_forward_pieces_start_small_so_a_slow_call_still_completes_one(): void
+    {
+        [, $records] = FixtureGenerator::timedOfSize($this->fixture('big.log'), 3 * 1024 * 1024, (int) strtotime('2026-03-01'));
+        $file = $this->logFile('big.log');
+
+        // Default options (forward_piece 64 MB) against an engine that stalls
+        // on more than 1.5 MB of input, e.g. idle-priority IO on a busy disk.
+        foreach ($this->stallingEngines(1536 * 1024, new ScanOptions()) as $label => $engine) {
+            $cursor = 0;
+            $count = 0;
+            $pages = 0;
+            do {
+                $page = $engine->search($file, new SearchCriteria(query: 'testing.ERROR', limit: 1_000_000, fromOffset: $cursor, timeout: 1));
+                $pages++;
+                $count += count($page->matches);
+
+                $next = $page->nextCursor === null ? null : ByteCursor::decode($page->nextCursor)->offset;
+                if ($next !== null) {
+                    $this->assertGreaterThan($cursor, $next, "{$label}: page {$pages} must move the cursor");
+                }
+                $cursor = $next;
+            } while ($cursor !== null && $pages < 20);
+
+            $this->assertNull($cursor, "{$label}: paging must finish");
+            $this->assertGreaterThan(1, $pages, "{$label}: the slow engine must have timed out");
+            $this->assertSame((int) ceil($records / 10), $count, $label);
+        }
+    }
+
+    /**
+     * The rg/grep engines available on this host, each wrapped so that it
+     * sleeps past any timeout when given more than $stallOver bytes in total
+     * (stdin plus file arguments). Deterministic, whatever the disk speed.
+     *
+     * @return array<string,CommandLineSearcher>
+     */
+    private function stallingEngines(int $stallOver, ScanOptions $options): array
+    {
+        $wrapper = ['sh', '-c', 'f=$(mktemp); cat > "$f"; n=$(wc -c < "$f"); '
+            .'for a in "$@"; do if [ -f "$a" ]; then n=$((n + $(wc -c < "$a"))); fi; done; '
+            .'if [ "$n" -gt '.$stallOver.' ]; then sleep 3; fi; '
+            .'"$0" "$@" < "$f"; s=$?; rm -f "$f"; exit $s'];
+
+        $finder = new ExecutableFinder();
+        $engines = [];
+        foreach (['grep' => 'grep', 'ripgrep' => 'rg'] as $engine => $binary) {
+            if ($finder->find($binary, null, ['/usr/local/bin', '/opt/homebrew/bin']) !== null) {
+                $engines[$engine] = new CommandLineSearcher($this->source(), $this->records(), $engine, $binary, true, $options, $wrapper);
+            }
+        }
+
+        if ($engines === []) {
+            $this->markTestSkipped('Neither grep nor rg is available on this host.');
+        }
+
+        return $engines;
+    }
+
     public function test_count_folds_header_less_lines_into_the_same_records_search_returns(): void
     {
         $text = '';

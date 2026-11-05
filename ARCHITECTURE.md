@@ -133,12 +133,18 @@ host page hasn't already provided it.
   - **Ranged CLI scans.** rg/grep have no offset flag, so a ranged scan feeds
     exactly `[start, end)` to the process on stdin (1 MB `fread` chunks through
     Symfony Process; one chunk in memory at a time) and adds `start` back to
-    each `--byte-offset`/`-b`. A range is scanned in pieces
-    (`search.forward_piece`, default 64 MB, doubling up to 1 GB), one process
-    each, with the dedupe state shared across pieces so results are the same
-    as one scan. A whole file that fits in one piece still passes the path. A
-    plain whole-file multi-file search stays one process; a ranged one runs
-    one process per file, in turn, under the shared limit and timeout.
+    each `--byte-offset`/`-b`. A range is scanned in pieces, one process
+    each: 1 MB first, doubling up to 1 GB, with the dedupe state shared
+    across pieces so results are the same as one scan. A whole file that fits
+    in the first piece still passes the path. `search.forward_piece` (default
+    64 MB) only matters outside that ramp: a smaller value also caps the
+    first piece, a value over 1 GB raises the cap.
+  - **Multi-file search** runs the files in turn, one piece-wise scan per
+    file, under one shared limit and timeout; files the budget never reaches
+    come back unscanned with a resumable cursor. Before 1.2.2 a plain
+    whole-file multi-file search was one rg/grep process over every file,
+    which can't say which files it finished when it times out, so every
+    file's cursor stayed at 0 and a client paging until done looped.
   - **Newest first** (`direction=backward`). Windows are scanned back from
     the end of the range, each aligned to a record header: 1 MB first, then
     doubling up to `search.backward_window` (default 64 MB). A window that
@@ -170,13 +176,15 @@ host page hasn't already provided it.
     in UTC, or raise `time_seek_margin`.
   - rg/grep can't report how far a timed-out process read, so a forward
     scan that times out resumes from the end of its last completed piece
-    (or its last match, if later). Every page therefore moves the cursor as
-    long as one piece fits in the timeout; before 1.2.1 a scan that timed
-    out before its first match returned the cursor it was given, forever.
-    A single record larger than a whole piece may be split at a line
-    boundary there. Pieces cost about 30% on a whole-file grep miss over
-    64 MB (stdin instead of reading the path). The PHP streamer reports
-    progress record by record.
+    (or its last match, if later). Every call starts with a 1 MB piece, so
+    the cursor moves as long as 1 MB can be scanned inside the timeout, on a
+    slow disk or under `ionice -c3` too; before 1.2.1 a scan that timed out
+    before its first match returned the cursor it was given, forever, and in
+    1.2.1 it still did when the first (64 MB) piece couldn't finish, or for
+    a multi-file search. A single record larger than a whole piece may be
+    split at a line boundary there. Files over 1 MB are fed on stdin rather
+    than read from the path, which cost about 30% on a whole-file grep miss
+    over 64 MB. The PHP streamer reports progress record by record.
 - An rg/grep error (exit code ≥ 2, e.g. a regex the engine's dialect
   rejects) raises `SearchFailedException` (HTTP 422) instead of looking like
   "no matches". Exit 2 caused only by one input (a file rotated away or

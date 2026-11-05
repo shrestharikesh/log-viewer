@@ -10,7 +10,6 @@ use Symfony\Component\Process\Process;
 use Vendor\LogExplorer\Contracts\LogSourceInterface;
 use Vendor\LogExplorer\Exceptions\SearchFailedException;
 use Vendor\LogExplorer\Reading\RecordAssembler;
-use Vendor\LogExplorer\Support\ByteCursor;
 use Vendor\LogExplorer\Support\LogFile;
 use Vendor\LogExplorer\Support\LogLine;
 
@@ -28,12 +27,20 @@ use Vendor\LogExplorer\Support\LogLine;
  * offset. A whole file that fits in one piece passes the path instead, so
  * the engine can read the file directly.
  *
- * PIECES: a range is scanned in consecutive pieces (ScanOptions::$forwardPiece,
- * doubling up to 1 GB), one process each. rg/grep can't report how far a
- * timed-out process got, so without pieces a scan that times out before its
- * first match would hand back the cursor it was given, and a client paging
- * until done would re-scan the same bytes forever. With pieces, the resume
- * point is at least the end of the last completed piece.
+ * PIECES: a range is scanned in consecutive pieces, one process each: 1 MB
+ * first (or ScanOptions::$forwardPiece if smaller), doubling up to 1 GB (or
+ * $forwardPiece if larger). rg/grep can't report how far a timed-out process
+ * got, so without pieces a scan that times out before its first match would
+ * hand back the cursor it was given, and a client paging until done would
+ * re-scan the same bytes forever. With pieces, the resume point is at least
+ * the end of the last completed piece, and the small first piece means even
+ * a slow call (busy disk, idle-priority IO) completes one.
+ *
+ * MULTI-FILE: searchMany() runs the files in turn through SearchRunner, one
+ * piece-wise scanRange() per file, under one shared limit and deadline. It
+ * deliberately does not hand every file to a single rg/grep process: such a
+ * process can't say which files it finished when it times out, so every
+ * file's cursor would stay where it started.
  *
  * A grep/rg hit is one PHYSICAL line, which may be a record's header or one
  * of its continuation lines (stack trace, pretty-printed context) — either
@@ -49,7 +56,15 @@ final class CommandLineSearcher implements RangeScanner
 {
     private const SLICE_CHUNK = 1048576;
 
-    /** Forward pieces double from ScanOptions::$forwardPiece up to this. */
+    /**
+     * First forward piece of a call, in bytes (or ScanOptions::$forwardPiece
+     * if smaller). Small enough to finish inside any sane timeout, so every
+     * call moves the cursor; the same idea as SearchRunner's first backward
+     * window.
+     */
+    private const FIRST_FORWARD_PIECE = 1024 * 1024;
+
+    /** Forward pieces double up to this (or ScanOptions::$forwardPiece if larger). */
     private const MAX_FORWARD_PIECE = 1024 * 1024 * 1024;
 
     private const PIECE_DONE = 'done';
@@ -106,17 +121,11 @@ final class CommandLineSearcher implements RangeScanner
             return [];
         }
 
-        $files = array_values($files);
-
-        // A plain whole-file, oldest-first search over several files stays
-        // ONE process for the batch. Anything ranged (time seek, cursor,
-        // endOffset, newest-first) runs one process per file, in turn, under
-        // the same shared limit and timeout.
-        if (count($files) > 1 && $this->isWholeFileForward($criteria)) {
-            return $this->runBatch($files, $criteria);
-        }
-
-        return (new SearchRunner($this, $this->source, $this->records, $this->options))->search($files, $criteria);
+        // One file at a time, in pieces, under the shared limit and deadline
+        // (see MULTI-FILE above): every file the budget reaches reports how
+        // far it got, and the rest come back unscanned and resumable.
+        return (new SearchRunner($this, $this->source, $this->records, $this->options))
+            ->search(array_values($files), $criteria);
     }
 
     public function scanRange(
@@ -140,8 +149,9 @@ final class CommandLineSearcher implements RangeScanner
         // Dedupe state shared by every piece, so a record whose hits straddle
         // a piece boundary is still handled once, exactly as one scan would.
         $state = ['resume' => $start, 'lastHeader' => -1, 'lastEnd' => -1, 'stream' => null];
-        $piece = max(1, $this->options->forwardPiece);
-        $maxPiece = max($piece, self::MAX_FORWARD_PIECE);
+        $configured = max(1, $this->options->forwardPiece);
+        $piece = min(self::FIRST_FORWARD_PIECE, $configured);
+        $maxPiece = max($configured, self::MAX_FORWARD_PIECE);
         $lo = $start;
 
         try {
@@ -339,6 +349,10 @@ final class CommandLineSearcher implements RangeScanner
     /**
      * The full argv: priority prefix (nice/ionice) + engine command.
      *
+     * The searcher itself always runs one input per process without
+     * filenames; $withFilename (prefix each hit with "path:") is kept for
+     * callers that build their own multi-path invocation.
+     *
      * @param  string[]  $paths
      * @return string[]
      */
@@ -428,14 +442,6 @@ final class CommandLineSearcher implements RangeScanner
         return $stderr;
     }
 
-    private function isWholeFileForward(SearchCriteria $criteria): bool
-    {
-        return ! $criteria->isBackward()
-            && $criteria->fromOffset <= 0
-            && $criteria->endOffset === null
-            && ($this->options->locator === null || ! $criteria->hasTimeBounds());
-    }
-
     /**
      * Read [start, end) of the file in fixed chunks, for the process's stdin.
      * Symfony Process pulls one chunk at a time as the pipe drains, so at
@@ -487,205 +493,6 @@ final class CommandLineSearcher implements RangeScanner
     }
 
     /**
-     * The single-process, whole-file batch behind a multi-file searchMany().
-     *
-     * Every file is handed to ONE rg/grep process, so a 5-file search costs one
-     * fork rather than five, and the limit/timeout below is spent across the
-     * whole batch. Output is consumed incrementally and the process is killed
-     * the moment the budget runs out, so nothing is ever fully buffered.
-     *
-     * @param  LogFile[]  $files
-     * @return FileSearchResult[]
-     */
-    private function runBatch(array $files, SearchCriteria $criteria): array
-    {
-        // Per-file bookkeeping, keyed by the resolved on-disk path because that
-        // is what rg/grep echo back on each output line.
-        $paths = [];
-        $state = [];
-
-        foreach ($files as $index => $file) {
-            $path = $this->source->localPath($file);
-            $size = $path === null ? 0 : $this->source->size($file);
-
-            $state[$index] = [
-                'file' => $file,
-                'size' => $size,
-                'mtime' => $this->source->lastModified($file),
-                'matches' => [],
-                'lastOffset' => 0,
-                'lastHeader' => -1,
-                'lastEnd' => -1,
-                'stream' => null,
-            ];
-
-            if ($path !== null) {
-                $paths[$path] = $index;
-            }
-        }
-
-        // Longest path first, so /a/b.log.1 is never mistaken for /a/b.log.
-        $prefixes = array_keys($paths);
-        usort($prefixes, static fn (string $a, string $b) => strlen($b) <=> strlen($a));
-
-        $process = new Process($this->command($criteria, $prefixes, true));
-        // A zero timeout would mean "none" to Symfony; treat it as spent.
-        $process->setTimeout(max(0.001, (float) $criteria->timeout));
-
-        $total = 0;
-        $buffer = '';
-        $stderr = '';
-        $sawOutput = false;
-        $hitLimit = false;
-        $timedOut = false;
-
-        $process->start();
-
-        try {
-            foreach ($process as $type => $data) {
-                if ($type !== Process::OUT) {
-                    $stderr = substr($stderr.$data, 0, 4096);
-
-                    continue;
-                }
-
-                $sawOutput = true;
-                $buffer .= $data;
-                $pos = 0;
-
-                while (($nl = strpos($buffer, "\n", $pos)) !== false) {
-                    $rawLine = substr($buffer, $pos, $nl - $pos);
-                    $pos = $nl + 1;
-
-                    // Each line is prefixed with its filename; that prefix is
-                    // how a match is attributed back to its file.
-                    $attributed = $this->attribute($rawLine, $prefixes, $paths);
-                    if ($attributed === null) {
-                        continue;
-                    }
-                    [$index, $rawLine] = $attributed;
-
-                    $hit = $this->parseOutputLine($rawLine, 0, $state[$index]['size']);
-                    if ($hit === null || $hit->offset < $state[$index]['lastEnd']) {
-                        continue;
-                    }
-
-                    $record = $this->records->readRecordAt(
-                        $this->streamFor($state, $index),
-                        $hit->offset,
-                        $state[$index]['size'],
-                    );
-
-                    if ($record === null) {
-                        continue;
-                    }
-                    $state[$index]['lastEnd'] = max($state[$index]['lastEnd'], $record->endOffset);
-
-                    if ($record->offset <= $state[$index]['lastHeader']) {
-                        continue;
-                    }
-                    $state[$index]['lastHeader'] = $record->offset;
-
-                    if (! $criteria->passesStructuredFilters($record)) {
-                        continue;
-                    }
-
-                    $state[$index]['matches'][] = $record;
-                    $state[$index]['lastOffset'] = $record->endOffset;
-                    $total++;
-
-                    if ($total >= $criteria->limit) {
-                        $hitLimit = true;
-                        break 2;
-                    }
-                }
-
-                $buffer = substr($buffer, $pos);
-            }
-        } catch (ProcessTimedOutException) {
-            // The shared wall-clock budget is spent: keep what we have and tell
-            // the caller the batch is resumable rather than blowing up.
-            $timedOut = true;
-        } finally {
-            foreach ($state as $entry) {
-                if ($entry['stream'] !== null) {
-                    fclose($entry['stream']);
-                }
-            }
-        }
-
-        if ($process->isRunning()) {
-            $process->stop(1);
-        }
-
-        $stopped = $hitLimit || $timedOut;
-
-        if (! $stopped) {
-            $this->assertSucceeded($process, $stderr, $sawOutput, $prefixes);
-        }
-
-        $results = [];
-        foreach ($state as $entry) {
-            $complete = ! $stopped;
-
-            $results[] = new FileSearchResult(
-                file: $entry['file'],
-                result: new SearchResult(
-                    matches: $entry['matches'],
-                    nextCursor: $complete
-                        ? null
-                        : (new ByteCursor(
-                            $entry['lastOffset'],
-                            ByteCursor::fingerprint($entry['size'], $entry['mtime']),
-                        ))->encode(),
-                    complete: $complete,
-                    engine: $this->engine,
-                    truncated: $hitLimit,
-                    range: ['start' => 0, 'end' => $entry['size']],
-                ),
-            );
-        }
-
-        return $results;
-    }
-
-    /**
-     * Lazily open (and cache in $state) the read handle used to reconstruct
-     * full records around this file's hits. Most files in a batch never have
-     * a hit, so this avoids opening a stream per file up front.
-     *
-     * @param  array<int,array{file:LogFile,stream:resource|null,...}>  $state
-     * @return resource
-     */
-    private function streamFor(array &$state, int $index)
-    {
-        if ($state[$index]['stream'] === null) {
-            $state[$index]['stream'] = $this->source->reader($state[$index]['file']);
-        }
-
-        return $state[$index]['stream'];
-    }
-
-    /**
-     * Strip the "path:" prefix an engine puts in front of a multi-file match and
-     * return the index of the file it belongs to.
-     *
-     * @param  string[]  $prefixes  paths, longest first
-     * @param  array<string,int>  $paths  path => file index
-     * @return array{0:int,1:string}|null  [file index, line without the prefix]
-     */
-    private function attribute(string $line, array $prefixes, array $paths): ?array
-    {
-        foreach ($prefixes as $path) {
-            if (str_starts_with($line, $path.':')) {
-                return [$paths[$path], substr($line, strlen($path) + 1)];
-            }
-        }
-
-        return null;
-    }
-
-    /**
      * The engine argv, without the priority prefix. `$paths` may be ['-'] to
      * read stdin.
      *
@@ -726,7 +533,7 @@ final class CommandLineSearcher implements RangeScanner
         $cmd = [$this->binary, '-b', '-a'];
         if ($withFilename) {
             // grep only prefixes filenames by default when given >1 file; force
-            // it so a one-file batch parses identically to a many-file one.
+            // it so one path parses identically to several.
             $cmd[] = '-H';
         }
         if (! $criteria->caseSensitive) {

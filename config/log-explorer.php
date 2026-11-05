@@ -178,9 +178,11 @@ return [
         // costs at most about one full window.
         'backward_window' => 64 * 1024 * 1024,
 
-        // rg/grep scan a range in pieces of this many bytes (doubling up to
-        // 1 GB), one process each, so a search that times out still reports
-        // how far it got and the next page continues from there.
+        // rg/grep scan a range in pieces, one process each, so a search that
+        // times out still reports how far it got and the next page continues
+        // from there. Pieces start at 1 MB and double up to 1 GB; a smaller
+        // value here also caps the first piece, a value over 1 GB raises the
+        // cap. Rarely needs changing.
         'forward_piece' => 64 * 1024 * 1024,
 
         // Run rg/grep under `nice -n N` so a big search doesn't starve the

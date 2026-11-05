@@ -103,7 +103,7 @@ To render the standalone route *inside your app's chrome*, set
     'time_seek' => true,             // binary-search from/to into a byte range
     'time_seek_margin' => 300,       // seconds of clock skew to tolerate
     'backward_window' => 64 << 20,   // bytes per newest-first window
-    'forward_piece' => 64 << 20,     // first rg/grep piece; a timeout still advances the cursor
+    'forward_piece' => 64 << 20,     // rg/grep pieces start at 1 MB, double to 1 GB; a timeout still advances the cursor
     'nice' => 10, 'ionice' => true,  // run rg/grep at low CPU/IO priority
 ],
 'download'=> ['max_download_size_mb' => 100, 'rate_limit' => '10,1', 'audit' => true],

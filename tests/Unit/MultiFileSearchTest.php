@@ -109,7 +109,7 @@ final class MultiFileSearchTest extends TestCase
     }
 
     /* ------------------------------------------------------------------ */
-    /* Single process invocation                                           */
+    /* Multi-path argv (CommandLineSearcher::command)                      */
     /* ------------------------------------------------------------------ */
 
     public function test_command_line_searcher_builds_one_invocation_for_all_files(): void
@@ -171,12 +171,17 @@ final class MultiFileSearchTest extends TestCase
         $total = array_sum(array_map(fn (FileSearchResult $r) => count($r->result->matches), $results));
         $this->assertSame(3, $total);
 
-        // A truncated batch must be resumable, not silently reported as done.
-        foreach ($results as $result) {
-            $this->assertFalse($result->result->complete);
-            $this->assertTrue($result->result->truncated);
-            $this->assertNotNull($result->result->nextCursor);
-        }
+        // Files are searched in turn, as the stream engine does: the first is
+        // exhausted, so it is complete; the shortfall lands on the second.
+        $this->assertCount(2, $results[0]->result->matches);
+        $this->assertTrue($results[0]->result->complete);
+        $this->assertNull($results[0]->result->nextCursor);
+
+        // A truncated file must be resumable, not silently reported as done.
+        $this->assertCount(1, $results[1]->result->matches);
+        $this->assertFalse($results[1]->result->complete);
+        $this->assertTrue($results[1]->result->truncated);
+        $this->assertNotNull($results[1]->result->nextCursor);
     }
 
     public function test_stream_search_many_shares_the_limit_across_the_batch(): void
