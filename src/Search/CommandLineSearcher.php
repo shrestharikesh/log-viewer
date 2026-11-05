@@ -67,6 +67,13 @@ final class CommandLineSearcher implements RangeScanner
     /** Forward pieces double up to this (or ScanOptions::$forwardPiece if larger). */
     private const MAX_FORWARD_PIECE = 1024 * 1024 * 1024;
 
+    /**
+     * Seconds of budget below which no new piece is started: launching a
+     * process (and feeding its first stdin chunk) can take longer than that,
+     * and a piece that can't finish adds nothing to the resume point.
+     */
+    private const MIN_PIECE_BUDGET = 0.05;
+
     private const PIECE_DONE = 'done';
     private const PIECE_STOPPED = 'stopped';
     private const PIECE_TIMED_OUT = 'timed_out';
@@ -157,7 +164,7 @@ final class CommandLineSearcher implements RangeScanner
         try {
             while ($lo < $end) {
                 $budget = $deadline - microtime(true);
-                if ($budget <= 0) {
+                if ($budget < self::MIN_PIECE_BUDGET) {
                     return new ScanOutcome($state['resume'], false, true);
                 }
 
@@ -267,9 +274,12 @@ final class CommandLineSearcher implements RangeScanner
         $sawOutput = false;
         $status = self::PIECE_DONE;
 
-        $process->start();
-
         try {
+            // Inside the try: start() ends with a timeout check (after
+            // pulling the first stdin chunk), so a piece launched on a short
+            // budget can time out before it produces anything.
+            $process->start();
+
             foreach ($process as $type => $data) {
                 if ($type !== Process::OUT) {
                     $stderr = substr($stderr.$data, 0, 4096);

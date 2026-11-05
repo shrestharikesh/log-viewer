@@ -4,7 +4,7 @@
     "keywords": ["laravel", "logs", "log-viewer", "tail", "streaming", "ripgrep", "sse"],
     "license": "MIT",
     "type": "library",
-    "version": "1.2.2",
+    "version": "1.2.3",
     "homepage": "https://github.com/shrestharikesh/log-viewer",
     "support": {
         "issues": "https://github.com/shrestharikesh/log-viewer/issues",

@@ -138,7 +138,10 @@ host page hasn't already provided it.
     across pieces so results are the same as one scan. A whole file that fits
     in the first piece still passes the path. `search.forward_piece` (default
     64 MB) only matters outside that ramp: a smaller value also caps the
-    first piece, a value over 1 GB raises the cap.
+    first piece, a value over 1 GB raises the cap. No piece is started with
+    under 50 ms of the timeout left, and a piece whose process times out
+    while still launching ends the scan as a resumable timeout; before 1.2.3
+    that case escaped as an exception and failed the whole request.
   - **Multi-file search** runs the files in turn, one piece-wise scan per
     file, under one shared limit and timeout; files the budget never reaches
     come back unscanned with a resumable cursor. Before 1.2.2 a plain
