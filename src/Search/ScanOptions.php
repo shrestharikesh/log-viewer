@@ -22,6 +22,10 @@ final class ScanOptions
         public readonly int $timeSeekMargin = 300,
         // Bytes per window for newest-first (backward) search.
         public readonly int $backwardWindow = 64 * 1024 * 1024,
+        // Bytes per process for the first piece of an rg/grep range scan;
+        // later pieces double (up to 1 GB). Bounds the work a timeout can
+        // lose, so every page makes progress.
+        public readonly int $forwardPiece = 64 * 1024 * 1024,
     ) {
     }
 }

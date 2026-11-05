@@ -178,6 +178,11 @@ return [
         // costs at most about one full window.
         'backward_window' => 64 * 1024 * 1024,
 
+        // rg/grep scan a range in pieces of this many bytes (doubling up to
+        // 1 GB), one process each, so a search that times out still reports
+        // how far it got and the next page continues from there.
+        'forward_piece' => 64 * 1024 * 1024,
+
         // Run rg/grep under `nice -n N` so a big search doesn't starve the
         // app. false disables.
         'nice' => 10,

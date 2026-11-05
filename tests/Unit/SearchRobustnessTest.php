@@ -102,6 +102,53 @@ final class SearchRobustnessTest extends TestCase
         $this->assertSame($sorted, $offsets, 'newest first across pages');
     }
 
+    public function test_a_cli_search_that_times_out_before_its_first_match_still_advances_the_cursor(): void
+    {
+        if ((new ExecutableFinder())->find('grep') === null) {
+            $this->markTestSkipped('grep binary not available on this host.');
+        }
+
+        $text = '';
+        for ($i = 0; $i < 400; $i++) {
+            $text .= "[2026-11-05 10:00:00] local.INFO: line {$i}\n";
+        }
+        file_put_contents($this->fixture('slow.log'), $text);
+        $file = $this->logFile('slow.log');
+
+        // grep that stalls on any input over 6 KB: small pieces finish, a big
+        // one (or the whole file at once) times out before printing anything.
+        $prefix = ['sh', '-c', 'f=$(mktemp); cat > "$f"; if [ "$(wc -c < "$f")" -gt 6000 ]; then sleep 3; fi; "$0" "$@" < "$f"; s=$?; rm -f "$f"; exit $s'];
+        $engine = new CommandLineSearcher($this->source(), $this->records(), 'grep', 'grep', true, new ScanOptions(forwardPiece: 2000), $prefix);
+
+        // Start past the first record, so the range is fed on stdin (and the
+        // wrapper sees its size) on every engine version.
+        $cursor = strlen("[2026-11-05 10:00:00] local.INFO: line 0\n");
+        $found = [];
+        $pages = 0;
+        do {
+            $page = $engine->search($file, new SearchCriteria(query: 'line 399', limit: 10, fromOffset: $cursor, timeout: 1));
+            $pages++;
+            $found = [...$found, ...$page->matches];
+
+            $next = $page->nextCursor === null ? null : ByteCursor::decode($page->nextCursor)->offset;
+            if ($next !== null) {
+                $this->assertGreaterThan($cursor, $next, 'every page must move the cursor');
+            }
+            $cursor = $next;
+        } while ($cursor !== null && $pages < 20);
+
+        $this->assertNull($cursor, 'paging must finish');
+        $this->assertGreaterThan(1, $pages, 'the slow grep must have timed out at least once');
+        $this->assertCount(1, $found);
+        $this->assertStringContainsString('line 399', $found[0]->raw);
+
+        // A count that times out reports progress the same way.
+        $count = (new SearchRunner($engine, $this->source(), $this->records()))
+            ->count([$file], new SearchCriteria(query: 'line 399', timeout: 1));
+        $this->assertFalse($count->complete);
+        $this->assertGreaterThan(0, ByteCursor::decode($count->files[0]['cursor'])->offset);
+    }
+
     public function test_count_folds_header_less_lines_into_the_same_records_search_returns(): void
     {
         $text = '';

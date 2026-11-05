@@ -25,8 +25,15 @@ use Vendor\LogExplorer\Support\LogLine;
  * RANGED SCANS: rg/grep have no "start at byte N" flag, so a scan of a byte
  * range [start, end) feeds exactly that slice to the process on stdin, in
  * 1 MB chunks read with fread, and adds `start` back to every reported
- * offset. A whole-file scan passes the path instead, so the engine can read
- * the file directly.
+ * offset. A whole file that fits in one piece passes the path instead, so
+ * the engine can read the file directly.
+ *
+ * PIECES: a range is scanned in consecutive pieces (ScanOptions::$forwardPiece,
+ * doubling up to 1 GB), one process each. rg/grep can't report how far a
+ * timed-out process got, so without pieces a scan that times out before its
+ * first match would hand back the cursor it was given, and a client paging
+ * until done would re-scan the same bytes forever. With pieces, the resume
+ * point is at least the end of the last completed piece.
  *
  * A grep/rg hit is one PHYSICAL line, which may be a record's header or one
  * of its continuation lines (stack trace, pretty-printed context) — either
@@ -41,6 +48,13 @@ use Vendor\LogExplorer\Support\LogLine;
 final class CommandLineSearcher implements RangeScanner
 {
     private const SLICE_CHUNK = 1048576;
+
+    /** Forward pieces double from ScanOptions::$forwardPiece up to this. */
+    private const MAX_FORWARD_PIECE = 1024 * 1024 * 1024;
+
+    private const PIECE_DONE = 'done';
+    private const PIECE_STOPPED = 'stopped';
+    private const PIECE_TIMED_OUT = 'timed_out';
 
     /**
      * @param  string[]  $commandPrefix  argv prepended to every invocation,
@@ -123,29 +137,125 @@ final class CommandLineSearcher implements RangeScanner
             return ScanOutcome::completed(max($start, $end));
         }
 
-        $budget = $deadline - microtime(true);
-        if ($budget <= 0) {
-            return new ScanOutcome($start, false, true);
+        // Dedupe state shared by every piece, so a record whose hits straddle
+        // a piece boundary is still handled once, exactly as one scan would.
+        $state = ['resume' => $start, 'lastHeader' => -1, 'lastEnd' => -1, 'stream' => null];
+        $piece = max(1, $this->options->forwardPiece);
+        $maxPiece = max($piece, self::MAX_FORWARD_PIECE);
+        $lo = $start;
+
+        try {
+            while ($lo < $end) {
+                $budget = $deadline - microtime(true);
+                if ($budget <= 0) {
+                    return new ScanOutcome($state['resume'], false, true);
+                }
+
+                $hi = $this->pieceEnd($file, $state, $lo, $end, $size, $piece);
+                $piece = min($piece * 2, $maxPiece);
+
+                $status = $this->scanPiece($file, $path, $criteria, $start, $lo, $hi, $end, $size, $budget, $onMatch, $headersOnly, $state);
+
+                if ($status !== self::PIECE_DONE) {
+                    return new ScanOutcome($state['resume'], false, $status === self::PIECE_TIMED_OUT);
+                }
+
+                // Everything below $hi has been scanned. rg/grep can't say
+                // how far a timed-out process read, so this is what lets a
+                // scan that times out before its first match still move the
+                // cursor instead of handing back the one it was given.
+                $state['resume'] = max($state['resume'], $hi);
+                $lo = $hi;
+            }
+        } finally {
+            if ($state['stream'] !== null) {
+                fclose($state['stream']);
+            }
         }
 
-        $whole = $start === 0 && $end === $size;
-        $input = $whole ? $path : '-';
+        return ScanOutcome::completed($end);
+    }
 
-        $process = new Process($this->command($criteria, [$input], false));
+    /**
+     * End of the forward piece starting at $lo: the header of the record
+     * containing byte ($lo + piece), so resuming there never starts inside a
+     * record. Falls back to the next line start when one record is larger
+     * than the whole piece. Always > $lo, so every piece makes progress.
+     *
+     * @param  array{stream:resource|null}  $state
+     */
+    private function pieceEnd(LogFile $file, array &$state, int $lo, int $end, int $size, int $piece): int
+    {
+        $target = $lo + $piece;
+        if ($target >= $end) {
+            return $end;
+        }
+
+        $state['stream'] ??= $this->source->reader($file);
+        $hi = $this->records->recordStartContaining($state['stream'], $target, $size);
+
+        return $hi > $lo ? $hi : $this->nextLineStart($state['stream'], $target, $end);
+    }
+
+    /**
+     * @param  resource  $stream
+     */
+    private function nextLineStart($stream, int $offset, int $end): int
+    {
+        fseek($stream, $offset, SEEK_SET);
+
+        while ($offset < $end) {
+            $chunk = fread($stream, 65536);
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+
+            $nl = strpos($chunk, "\n");
+            if ($nl !== false) {
+                return min($end, $offset + $nl + 1);
+            }
+            $offset += strlen($chunk);
+        }
+
+        return $end;
+    }
+
+    /**
+     * Run one rg/grep process over [$lo, $hi), handing matching records to
+     * $onMatch. Records are resolved against the whole scan's [$start, $end),
+     * not the piece, so piece boundaries never change what matches.
+     *
+     * @param  array{resume:int,lastHeader:int,lastEnd:int,stream:resource|null}  $state
+     * @return string  one of the PIECE_* constants
+     */
+    private function scanPiece(
+        LogFile $file,
+        string $path,
+        SearchCriteria $criteria,
+        int $start,
+        int $lo,
+        int $hi,
+        int $end,
+        int $size,
+        float $budget,
+        callable $onMatch,
+        bool $headersOnly,
+        array &$state,
+    ): string {
+        // A piece covering the whole file passes the path, so the engine
+        // reads the file directly; anything else is fed on stdin.
+        $whole = $lo === 0 && $hi === $size;
+
+        $process = new Process($this->command($criteria, [$whole ? $path : '-'], false));
         $process->setTimeout($budget);
         if (! $whole) {
-            $process->setInput($this->slice($file, $start, $end));
+            $process->setInput($this->slice($file, $lo, $hi));
         }
 
-        $stream = null;
         $buffer = '';
         $stderr = '';
         $sawOutput = false;
-        $resume = $start;
-        $lastHeader = -1;
-        $lastEnd = -1;
-        $stopped = false;
-        $timedOut = false;
+        $status = self::PIECE_DONE;
 
         $process->start();
 
@@ -165,46 +275,46 @@ final class CommandLineSearcher implements RangeScanner
                     $rawLine = substr($buffer, $pos, $nl - $pos);
                     $pos = $nl + 1;
 
-                    // Bounded by $end: a whole-file scan reads the live path,
+                    // Bounded by $hi: a whole-file scan reads the live path,
                     // so lines appended after the size snapshot are dropped.
-                    $hit = $this->parseOutputLine($rawLine, $start, $end);
+                    $hit = $this->parseOutputLine($rawLine, $lo, $hi);
                     // A hit inside the record just handled is part of it:
                     // skip it before paying for a header lookup. This is
                     // also what keeps header-less files from yielding one
                     // overlapping record per matching line.
-                    if ($hit === null || $hit->offset < $lastEnd) {
+                    if ($hit === null || $hit->offset < $state['lastEnd']) {
                         continue;
                     }
 
-                    $stream ??= $this->source->reader($file);
+                    $state['stream'] ??= $this->source->reader($file);
                     // Folds stop at $end, so a window never re-reads the
                     // next window's lines (matters only where $end is not a
                     // record header: header-less or over-long records).
-                    $record = $this->recordFor($stream, $hit, $end, $headersOnly);
+                    $record = $this->recordFor($state['stream'], $hit, $end, $headersOnly);
                     if ($record === null) {
                         continue;
                     }
 
                     // Remember how far this record reaches even when it is
                     // skipped below, so its remaining hits are skipped cheaply.
-                    $lastEnd = max($lastEnd, $record->endOffset);
+                    $state['lastEnd'] = max($state['lastEnd'], $record->endOffset);
 
                     // Skip records that start before the range (they belong
                     // to an earlier page or window) and repeat hits in a
                     // record already handled.
-                    if ($record->offset < $start || $record->offset <= $lastHeader) {
+                    if ($record->offset < $start || $record->offset <= $state['lastHeader']) {
                         continue;
                     }
-                    $lastHeader = $record->offset;
+                    $state['lastHeader'] = $record->offset;
 
                     if (! $criteria->passesStructuredFilters($record)) {
                         continue;
                     }
 
-                    $resume = $record->endOffset;
+                    $state['resume'] = max($state['resume'], $record->endOffset);
 
                     if ($onMatch($record) === false) {
-                        $stopped = true;
+                        $status = self::PIECE_STOPPED;
                         break 2;
                     }
                 }
@@ -212,24 +322,18 @@ final class CommandLineSearcher implements RangeScanner
                 $buffer = substr($buffer, $pos);
             }
         } catch (ProcessTimedOutException) {
-            $timedOut = true;
-        } finally {
-            if ($stream !== null) {
-                fclose($stream);
-            }
+            $status = self::PIECE_TIMED_OUT;
         }
 
         if ($process->isRunning()) {
             $process->stop(1);
         }
 
-        if (! $stopped && ! $timedOut) {
+        if ($status === self::PIECE_DONE) {
             $this->assertSucceeded($process, $stderr, $sawOutput, $whole ? [$path] : []);
         }
 
-        return ($stopped || $timedOut)
-            ? new ScanOutcome($resume, false, $timedOut)
-            : ScanOutcome::completed($end);
+        return $status;
     }
 
     /**

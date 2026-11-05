@@ -133,9 +133,12 @@ host page hasn't already provided it.
   - **Ranged CLI scans.** rg/grep have no offset flag, so a ranged scan feeds
     exactly `[start, end)` to the process on stdin (1 MB `fread` chunks through
     Symfony Process; one chunk in memory at a time) and adds `start` back to
-    each `--byte-offset`/`-b`. A whole-file scan still passes the path. A plain
-    whole-file multi-file search stays one process; a ranged one runs one
-    process per file, in turn, under the shared limit and timeout.
+    each `--byte-offset`/`-b`. A range is scanned in pieces
+    (`search.forward_piece`, default 64 MB, doubling up to 1 GB), one process
+    each, with the dedupe state shared across pieces so results are the same
+    as one scan. A whole file that fits in one piece still passes the path. A
+    plain whole-file multi-file search stays one process; a ranged one runs
+    one process per file, in turn, under the shared limit and timeout.
   - **Newest first** (`direction=backward`). Windows are scanned back from
     the end of the range, each aligned to a record header: 1 MB first, then
     doubling up to `search.backward_window` (default 64 MB). A window that
@@ -165,10 +168,15 @@ host page hasn't already provided it.
     That includes a DST fall-back hour when the app timezone observes DST: the
     repeated hour steps back 3600 s, more than the default margin. Run the app
     in UTC, or raise `time_seek_margin`.
-  - A forward rg/grep scan that times out before its first match returns the
-    same cursor it was given. The engine can't report how far it read. The
-    seek keeps ranges small enough that this needs a rare term over a very
-    wide range. The PHP streamer does report progress.
+  - rg/grep can't report how far a timed-out process read, so a forward
+    scan that times out resumes from the end of its last completed piece
+    (or its last match, if later). Every page therefore moves the cursor as
+    long as one piece fits in the timeout; before 1.2.1 a scan that timed
+    out before its first match returned the cursor it was given, forever.
+    A single record larger than a whole piece may be split at a line
+    boundary there. Pieces cost about 30% on a whole-file grep miss over
+    64 MB (stdin instead of reading the path). The PHP streamer reports
+    progress record by record.
 - An rg/grep error (exit code ≥ 2, e.g. a regex the engine's dialect
   rejects) raises `SearchFailedException` (HTTP 422) instead of looking like
   "no matches". Exit 2 caused only by one input (a file rotated away or

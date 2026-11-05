@@ -8,8 +8,9 @@ namespace Vendor\LogExplorer\Search;
  * How a RangeScanner::scanRange() call ended.
  *
  * `resumeOffset` is where a forward scan would continue: the range end when
- * the scan completed, otherwise just past the last record handed to the
- * callback (or the range start if none was).
+ * the scan completed, otherwise the furthest of: just past the last record
+ * handed to the callback, the end of the part of the range already fully
+ * scanned, or the range start if neither applies.
  */
 final class ScanOutcome
 {

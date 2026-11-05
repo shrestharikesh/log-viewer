@@ -181,6 +181,7 @@ final class SearchManager
             locator: $seek ? new TimeOffsetLocator($this->scanner, $this->parsers) : null,
             timeSeekMargin: max(0, (int) $this->config->get('log-explorer.search.time_seek_margin', 300)),
             backwardWindow: max(1, (int) $this->config->get('log-explorer.search.backward_window', 64 * 1024 * 1024)),
+            forwardPiece: max(1, (int) $this->config->get('log-explorer.search.forward_piece', 64 * 1024 * 1024)),
         );
     }
 
