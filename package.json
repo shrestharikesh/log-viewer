@@ -1,0 +1,11 @@
+{
+    "private": true,
+    "description": "Build tooling only: compiles the standalone page's Tailwind CSS into resources/dist. Not needed to use the package.",
+    "scripts": {
+        "build:css": "tailwindcss -c tailwind.config.js -i resources/css/standalone.css -o resources/dist/log-explorer-standalone.css --minify"
+    },
+    "devDependencies": {
+        "@tailwindcss/forms": "0.5.10",
+        "tailwindcss": "3.4.17"
+    }
+}

@@ -6,8 +6,8 @@ namespace Vendor\LogExplorer\Http\Controllers;
 
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\StreamedResponse;
-use Vendor\LogExplorer\Facades\LogExplorer;
 use Vendor\LogExplorer\Http\Controllers\Concerns\ResolvesLogFile;
+use Vendor\LogExplorer\Http\QueryInput;
 use Vendor\LogExplorer\Streaming\LogStreamer;
 use Vendor\LogExplorer\Support\ByteCursor;
 
@@ -30,10 +30,10 @@ final class LogStreamController
         }
 
         $file = $this->resolveFile($request);
-        $source = LogExplorer::source($request->query('source') ?: null);
+        $source = $this->resolveSource($request);
 
         // Start at the given cursor, or at EOF (follow new lines only).
-        $fromOffset = ByteCursor::decode($request->query('cursor'))?->offset ?? $source->size($file);
+        $fromOffset = ByteCursor::decode(QueryInput::string($request, 'cursor'))?->offset ?? $source->size($file);
 
         $response = new StreamedResponse(function () use ($streamer, $file, $fromOffset): void {
             // Disable output buffering / time limit for the long-lived stream.

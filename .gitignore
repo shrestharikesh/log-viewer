@@ -10,3 +10,6 @@ phpunit.xml.bak
 # Local tool session state — not part of the package
 /.claude/
 /.tldr/
+
+# CSS build tooling (npm run build:css)
+/node_modules/

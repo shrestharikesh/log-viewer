@@ -8,8 +8,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{{ $config['title'] ?? 'Log Explorer' }}</title>
-    <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
-    <script>tailwind.config = { darkMode: 'class' }</script>
+    {{-- Compiled Tailwind (npm run build:css), shipped with the package: no runtime CDN script. --}}
+    <link rel="stylesheet" href="{{ asset('vendor/log-explorer/log-explorer-standalone.css') }}">
     <link rel="stylesheet" href="{{ asset('vendor/log-explorer/log-explorer.css') }}">
 </head>
 <body class="h-full bg-gray-100 dark:bg-gray-950 text-gray-900 dark:text-gray-100 antialiased">

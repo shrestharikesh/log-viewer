@@ -270,7 +270,9 @@ final class RangedSearchTest extends TestCase
         $cmd = $searcher->command(new SearchCriteria(query: 'x'), ['-'], false);
 
         $this->assertSame($prefix, array_slice($cmd, 0, count($prefix)));
-        $this->assertSame('grep', $cmd[count($prefix)]);
+        // The engine runs by the absolute path it was found at, not by name.
+        $this->assertSame('grep', basename($cmd[count($prefix)]));
+        $this->assertSame($searcher->resolvedBinary(), $cmd[count($prefix)]);
 
         if (is_executable('/usr/bin/nice') || is_executable('/bin/nice')) {
             $this->assertContains('-n', $prefix);

@@ -196,7 +196,8 @@ final class SearchManager
      * Each wrapper is used only if its binary is found AND a trial run of it
      * succeeds (BusyBox's ionice, common on Alpine images, rejects `-t`; a
      * wrapper that fails would make every search silently return nothing).
-     * The check runs once per worker. Still an argv array, so no shell.
+     * The check runs once per worker. Wrappers are absolute paths with fixed
+     * arguments from config only; Symfony Process quotes every argument.
      *
      * @return string[]
      */

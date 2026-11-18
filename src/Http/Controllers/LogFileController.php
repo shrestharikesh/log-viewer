@@ -6,8 +6,9 @@ namespace Vendor\LogExplorer\Http\Controllers;
 
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Vendor\LogExplorer\Facades\LogExplorer;
+use Vendor\LogExplorer\Auth\Authorizer;
 use Vendor\LogExplorer\Http\Controllers\Concerns\ResolvesLogFile;
+use Vendor\LogExplorer\Support\LogFile;
 
 /**
  * GET {prefix}/api/files       — list discoverable log files
@@ -17,9 +18,17 @@ final class LogFileController
 {
     use ResolvesLogFile;
 
-    public function index(Request $request): JsonResponse
+    public function index(Request $request, Authorizer $authorizer): JsonResponse
     {
-        $source = LogExplorer::source($request->query('source') ?: null);
+        $source = $this->resolveSource($request);
+        $user = $request->user();
+
+        // Only the files this user may view, per file, so a gate or
+        // authorizeUsing() callback can hide some logs entirely.
+        $visible = array_values(array_filter(
+            $source->files(),
+            static fn (LogFile $file): bool => $authorizer->canView($user, $file),
+        ));
 
         $files = array_map(fn ($file) => [
             'identifier' => $file->identifier,
@@ -29,7 +38,7 @@ final class LogFileController
             'size' => $source->size($file),
             'size_human' => $this->human($source->size($file)),
             'last_modified' => $source->lastModified($file),
-        ], $source->files());
+        ], $visible);
 
         return response()->json(['data' => $files]);
     }
@@ -37,7 +46,7 @@ final class LogFileController
     public function show(Request $request): JsonResponse
     {
         $file = $this->resolveFile($request);
-        $source = LogExplorer::source($request->query('source') ?: null);
+        $source = $this->resolveSource($request);
 
         $size = $source->size($file);
 

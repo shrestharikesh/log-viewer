@@ -15,6 +15,12 @@ use Vendor\LogExplorer\Support\LogFile;
  * Secure by default: when `authorization.strict` is true and the relevant gate
  * is undefined, access is DENIED rather than silently allowed. A custom
  * callback (config or LogExplorer::authorizeUsing) takes precedence over gates.
+ *
+ * View is checked twice per request: once by the route middleware with
+ * `$file = null` ("may this user use the log viewer at all?"), then per file
+ * with the LogFile (listing, and every read/search/stream/download), so a
+ * gate or callback can allow some files and refuse others. A gate written as
+ * `fn ($user) => ...` simply ignores the file.
  */
 final class Authorizer
 {

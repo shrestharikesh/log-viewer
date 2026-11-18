@@ -10,9 +10,11 @@ use Symfony\Component\HttpFoundation\Response;
 use Vendor\LogExplorer\Auth\Authorizer;
 
 /**
- * Gatekeeps every package route with the "view" ability. Download authorization
- * is additionally enforced in the download controller (which checks the
- * separate download gate against the specific file).
+ * Gatekeeps every package route with the "view" ability, with no file (general
+ * access). Per-file view access is checked where the file is resolved
+ * (ResolvesLogFile) and in the file listing; download authorization is
+ * additionally enforced in the download controller (the separate download
+ * gate, against the specific file).
  */
 final class Authorize
 {

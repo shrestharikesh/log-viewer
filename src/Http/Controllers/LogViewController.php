@@ -7,6 +7,7 @@ namespace Vendor\LogExplorer\Http\Controllers;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Vendor\LogExplorer\Http\Controllers\Concerns\ResolvesLogFile;
+use Vendor\LogExplorer\Http\QueryInput;
 use Vendor\LogExplorer\Reading\FileReader;
 
 /**
@@ -26,7 +27,7 @@ final class LogViewController
 
         $result = $reader->page(
             file: $file,
-            cursor: $request->query('cursor'),
+            cursor: QueryInput::string($request, 'cursor'),
             limit: $this->clampLimit($request),
             direction: $direction,
             parse: $request->boolean('parse', true),

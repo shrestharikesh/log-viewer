@@ -9,7 +9,6 @@ use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\RateLimiter;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Vendor\LogExplorer\Auth\Authorizer;
-use Vendor\LogExplorer\Facades\LogExplorer;
 use Vendor\LogExplorer\Http\Controllers\Concerns\ResolvesLogFile;
 use Vendor\LogExplorer\Reading\LineScanner;
 use Vendor\LogExplorer\Reading\Tailer;
@@ -39,6 +38,7 @@ final class LogDownloadController
             abort(403, 'Downloads are disabled.');
         }
 
+        // Also enforces per-file VIEW access; download needs both.
         $file = $this->resolveFile($request);
         $user = $request->user();
 
@@ -57,7 +57,7 @@ final class LogDownloadController
         }
         RateLimiter::hit($key, $decay * 60);
 
-        $source = LogExplorer::source($request->query('source') ?: null);
+        $source = $this->resolveSource($request);
         $size = $source->size($file);
         $mode = $request->query('mode');
 

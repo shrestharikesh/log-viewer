@@ -9,6 +9,7 @@ use Illuminate\Http\Request;
 use Vendor\LogExplorer\Exceptions\SearchFailedException;
 use Vendor\LogExplorer\Http\Controllers\Concerns\BuildsSearchCriteria;
 use Vendor\LogExplorer\Http\Controllers\Concerns\ResolvesLogFile;
+use Vendor\LogExplorer\Http\QueryInput;
 use Vendor\LogExplorer\Search\CountResult;
 use Vendor\LogExplorer\Search\SearchManager;
 
@@ -31,7 +32,7 @@ final class LogCountController
     {
         $file = $this->resolveFile($request);
 
-        $bucket = (string) $request->query('bucket', 'hour');
+        $bucket = (string) QueryInput::string($request, 'bucket', 'hour');
         if (! in_array($bucket, CountResult::BUCKETS, true)) {
             abort(422, 'The "bucket" must be one of: '.implode(', ', CountResult::BUCKETS).'.');
         }

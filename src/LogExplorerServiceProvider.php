@@ -6,7 +6,10 @@ namespace Vendor\LogExplorer;
 
 use Illuminate\Contracts\Auth\Access\Gate;
 use Illuminate\Contracts\Config\Repository as Config;
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use Vendor\LogExplorer\Auth\Authorizer;
 use Vendor\LogExplorer\Http\Middleware\Authorize;
@@ -19,6 +22,15 @@ use Vendor\LogExplorer\View\Components\LogExplorer as LogExplorerComponent;
 
 final class LogExplorerServiceProvider extends ServiceProvider
 {
+    /**
+     * Requests per minute, per user (or IP), when `routes.rate_limits` does
+     * not set them — e.g. a config published before the key existed.
+     * "search" covers search and count (each can run rg/grep for up to
+     * search.timeout); "stream" covers SSE connections (each holds a worker
+     * for up to streaming.max_duration).
+     */
+    public const DEFAULT_RATE_LIMITS = ['search' => 60, 'stream' => 30];
+
     public function register(): void
     {
         $this->mergeConfigFrom(__DIR__.'/../config/log-explorer.php', 'log-explorer');
@@ -68,8 +80,30 @@ final class LogExplorerServiceProvider extends ServiceProvider
     public function boot(): void
     {
         $this->loadViewsFrom(__DIR__.'/../resources/views', 'log-explorer');
+        $this->registerRateLimiters();
         $this->loadComponentsAndRoutes();
         $this->registerPublishing();
+    }
+
+    /**
+     * Named limiters "log-explorer.search" and "log-explorer.stream", applied
+     * in routes/web.php. Read config on every request, so a runtime change
+     * (or a test) takes effect without re-registering. 0/null/false = no limit.
+     */
+    private function registerRateLimiters(): void
+    {
+        foreach (self::DEFAULT_RATE_LIMITS as $name => $default) {
+            RateLimiter::for("log-explorer.{$name}", static function (Request $request) use ($name, $default) {
+                $perMinute = (int) config("log-explorer.routes.rate_limits.{$name}", $default);
+
+                if ($perMinute <= 0) {
+                    return Limit::none();
+                }
+
+                return Limit::perMinute($perMinute)
+                    ->by($name.':'.($request->user()?->getAuthIdentifier() ?? $request->ip()));
+            });
+        }
     }
 
     private function loadComponentsAndRoutes(): void

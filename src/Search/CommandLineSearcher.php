@@ -49,8 +49,17 @@ use Vendor\LogExplorer\Support\LogLine;
  * header-less rows. Hits arrive in file order, so two hits in one record are
  * de-duped by remembering only the last record header.
  *
- * SECURITY: arguments are passed as an array to Symfony Process (no shell), so
- * the query string is never interpreted by a shell — no command injection.
+ * SECURITY: the command is built as an argv array; nothing from the request
+ * but the query text and a validated file path ever reaches it.
+ *   - Symfony Process runs an array command on Unix as `exec 'a' 'b' ...`
+ *     through /bin/sh, with every argument single-quoted, so the shell never
+ *     interprets the query (no command injection).
+ *   - The query always follows `-e` (rg) or `--` (grep), so a query such as
+ *     "--pre=cmd" is a pattern, never an option. rg also gets `--no-config`,
+ *     so RIPGREP_CONFIG_PATH cannot add options, and neither engine is ever
+ *     given a flag that runs another program (`--pre`, `-z`).
+ *   - The binary is resolved to an absolute path once, and that exact file
+ *     is what runs — not whatever a later PATH lookup would find.
  */
 final class CommandLineSearcher implements RangeScanner
 {
@@ -77,6 +86,12 @@ final class CommandLineSearcher implements RangeScanner
     private const PIECE_DONE = 'done';
     private const PIECE_STOPPED = 'stopped';
     private const PIECE_TIMED_OUT = 'timed_out';
+
+    /** Where a bare binary name is looked up besides PATH (PHP-FPM often runs with a minimal PATH). */
+    private const EXTRA_BINARY_DIRS = ['/usr/local/bin', '/opt/homebrew/bin', '/usr/bin', '/bin'];
+
+    /** Absolute path of $binary once resolved; false when it was not found. */
+    private string|false|null $resolvedBinary = null;
 
     /**
      * @param  string[]  $commandPrefix  argv prepended to every invocation,
@@ -109,8 +124,40 @@ final class CommandLineSearcher implements RangeScanner
             return false;
         }
 
-        return (new ExecutableFinder())->find($this->binary, null, ['/usr/local/bin', '/opt/homebrew/bin']) !== null
-            || is_executable($this->binary);
+        return $this->resolvedBinary() !== null;
+    }
+
+    /**
+     * Absolute path of the engine binary, resolved once per instance. A
+     * configured value containing a slash is used as given (made absolute)
+     * when it is an executable file; a bare name is looked up on PATH and in
+     * EXTRA_BINARY_DIRS. The path is not run through realpath(): a BusyBox
+     * applet such as /bin/grep -> /bin/busybox only works under its own name.
+     */
+    public function resolvedBinary(): ?string
+    {
+        if ($this->resolvedBinary === null) {
+            $this->resolvedBinary = self::resolveExecutable($this->binary) ?? false;
+        }
+
+        return $this->resolvedBinary === false ? null : $this->resolvedBinary;
+    }
+
+    private static function resolveExecutable(string $binary): ?string
+    {
+        if ($binary === '') {
+            return null;
+        }
+
+        if (str_contains($binary, '/') || str_contains($binary, '\\')) {
+            $absolute = str_starts_with($binary, '/') || preg_match('~^[A-Za-z]:[\\\\/]~', $binary) === 1
+                ? $binary
+                : getcwd().DIRECTORY_SEPARATOR.$binary;
+
+            return is_file($absolute) && is_executable($absolute) ? $absolute : null;
+        }
+
+        return (new ExecutableFinder())->find($binary, null, self::EXTRA_BINARY_DIRS);
     }
 
     public function search(LogFile $file, SearchCriteria $criteria): SearchResult
@@ -512,10 +559,13 @@ final class CommandLineSearcher implements RangeScanner
     private function buildCommand(SearchCriteria $criteria, array $paths, bool $withFilename): array
     {
         $query = $criteria->hasTextQuery() ? $criteria->query : '';
+        // The bare name only when it was never found, in which case
+        // available() is false and the engine is never chosen to run.
+        $binary = $this->resolvedBinary() ?? $this->binary;
 
         if ($this->engine === 'ripgrep') {
             $cmd = [
-                $this->binary,
+                $binary,
                 '--no-config',
                 '--color', 'never',
                 '--no-heading',
@@ -540,7 +590,7 @@ final class CommandLineSearcher implements RangeScanner
         }
 
         // grep
-        $cmd = [$this->binary, '-b', '-a'];
+        $cmd = [$binary, '-b', '-a'];
         if ($withFilename) {
             // grep only prefixes filenames by default when given >1 file; force
             // it so one path parses identically to several.

@@ -126,9 +126,11 @@ final class MultiFileSearchTest extends TestCase
             true,
         );
 
-        // A single argv: one binary, both files, filename prefixing forced on.
-        $this->assertSame('grep', $cmd[0]);
-        $this->assertSame(1, array_count_values($cmd)['grep']);
+        // A single argv: one binary (by its resolved path), both files,
+        // filename prefixing forced on.
+        $binary = $searcher->resolvedBinary() ?? 'grep';
+        $this->assertSame($binary, $cmd[0]);
+        $this->assertSame(1, array_count_values($cmd)[$binary]);
         $this->assertContains('-H', $cmd);
         $this->assertContains('/tmp/one.log', $cmd);
         $this->assertContains('/tmp/two.log', $cmd);

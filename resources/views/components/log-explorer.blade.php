@@ -11,19 +11,26 @@
         'streamingEnabled' => (bool) config('log-explorer.streaming.enabled', true),
         'levels' => ['emergency','alert','critical','error','warning','notice','info','debug'],
     ];
+    $alpineScript = $alpine();
 @endphp
 
-{{-- Load Alpine only if the host page hasn't already. --}}
+{{-- Load Alpine only if the host page hasn't already: an exact, integrity-checked file (config ui.alpine). --}}
 @once
+    @if ($alpineScript)
     <script>
         if (!window.__logExplorerAlpine && typeof window.Alpine === 'undefined') {
             window.__logExplorerAlpine = true;
             var s = document.createElement('script');
             s.defer = true;
-            s.src = 'https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js';
+            @if ($alpineScript['integrity'])
+            s.integrity = @js($alpineScript['integrity']);
+            s.crossOrigin = 'anonymous';
+            @endif
+            s.src = @js($alpineScript['url']);
             document.head.appendChild(s);
         }
     </script>
+    @endif
 @endonce
 <script src="{{ asset('vendor/log-explorer/log-explorer.js') }}" defer></script>
 

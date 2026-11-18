@@ -67,6 +67,22 @@ Gate::define('downloadLogs', fn ($user) => $user->isSuperAdmin());
 
 That's it — open `/admin/logs`.
 
+Gates also receive the file, so access can differ per log. `viewLogs` is
+checked once per request with no file (may this user open the viewer at all?)
+and again for each file: in the file list, and on every read, search, stream
+and download. A gate that ignores the second argument works as before.
+
+```php
+use Vendor\LogExplorer\Support\LogFile;
+
+Gate::define('viewLogs', fn ($user, ?LogFile $file = null) =>
+    $user->isAdmin() && ($file === null || $file->name !== 'payments.log' || $user->isSuperAdmin()));
+```
+
+> **Upgrading:** re-run `vendor:publish --tag=log-explorer-assets --force`
+> after updating the package. The standalone page now loads a compiled
+> stylesheet (`log-explorer-standalone.css`) instead of the Tailwind CDN script.
+
 ---
 
 ## Integration modes
@@ -108,6 +124,12 @@ To render the standalone route *inside your app's chrome*, set
 ],
 'download'=> ['max_download_size_mb' => 100, 'rate_limit' => '10,1', 'audit' => true],
 'streaming' => ['driver' => 'sse', 'max_duration' => 60],
+
+// Requests per minute per user, 0 = off. search covers /api/search + /api/count.
+'routes'  => ['rate_limits' => ['search' => 60, 'stream' => 30]],
+
+// Alpine.js: an exact version, integrity-checked. null = your layout loads Alpine.
+'ui'      => ['alpine' => ['url' => '…alpinejs@3.17.5/dist/cdn.min.js', 'integrity' => 'sha384-…']],
 ```
 
 See the published config for every option (all documented inline).
@@ -116,7 +138,9 @@ See the published config for every option (all documented inline).
 
 ## JSON API
 
-All endpoints are under `{prefix}/api` and are guarded by the view gate.
+All endpoints are under `{prefix}/api` and are guarded by the view gate, per
+file. An unknown `source` is a 404; `search`, `count` and `stream` are
+rate-limited (`routes.rate_limits`, HTTP 429 when exceeded).
 
 | Method & path            | Purpose                                  | Key query params                              |
 |--------------------------|------------------------------------------|-----------------------------------------------|

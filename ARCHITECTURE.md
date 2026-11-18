@@ -105,7 +105,14 @@ search, level/regex/date filters, cursor pagination + infinite scroll, tail
 presets, live follow (SSE), file selector, guarded download, copy-line,
 expandable entries, JSON pretty-printing. Ships as a Blade component so it
 embeds into Filament/Nova/custom dashboards; Alpine is lazy-loaded only if the
-host page hasn't already provided it.
+host page hasn't already provided it, from an exact version checked against its
+Subresource Integrity hash (`ui.alpine`).
+
+The standalone page's Tailwind is compiled ahead of time into
+`resources/dist/log-explorer-standalone.css` (`npm ci && npm run build:css`,
+config in `tailwind.config.js`) rather than loaded from the Tailwind Play CDN:
+that CDN sends no CORS headers, so its script cannot be integrity-checked.
+Rebuild after changing Tailwind classes in the views or `log-explorer.js`.
 
 ## 9. Performance strategy
 

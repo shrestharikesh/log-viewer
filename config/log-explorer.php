@@ -26,6 +26,17 @@ return [
 
         // Middleware applied to all package routes. Keep this locked down.
         'middleware' => ['web', 'auth'],
+
+        // Requests per minute, per user (IP when unauthenticated), for the
+        // endpoints that cost real server resources. 0 disables a limit.
+        //   search: /api/search and /api/count — each can run rg/grep for up
+        //           to search.timeout seconds.
+        //   stream: /api/stream — each SSE connection holds a PHP worker for
+        //           up to streaming.max_duration seconds, then reconnects.
+        'rate_limits' => [
+            'search' => 60,
+            'stream' => 30,
+        ],
     ],
 
     /*
@@ -279,5 +290,16 @@ return [
         // Layout shell for the standalone route. Set to your app layout to
         // embed the viewer inside an existing dashboard chrome.
         'layout' => null,
+
+        // Alpine.js, loaded by the component only when the page has not
+        // loaded Alpine already. Pinned to an exact version and checked
+        // against its Subresource Integrity hash, so the browser refuses the
+        // file if the CDN ever serves anything else. Point 'url' at a copy
+        // you host (with its own hash, or 'integrity' => null), or set the
+        // whole key to null if your layout always loads Alpine itself.
+        'alpine' => [
+            'url' => 'https://cdn.jsdelivr.net/npm/alpinejs@3.17.5/dist/cdn.min.js',
+            'integrity' => 'sha384-FYLKjwG3aohNhNZoVG8sY/5ntunm+MqylL90Q+rT3OM7AwV9/BKFjk/RjoIpIgsI',
+        ],
     ],
 ];

@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Routing\Middleware\ThrottleRequests;
 use Illuminate\Support\Facades\Route;
 use Vendor\LogExplorer\Http\Controllers\LogCountController;
 use Vendor\LogExplorer\Http\Controllers\LogDownloadController;
@@ -26,14 +27,22 @@ use Vendor\LogExplorer\Http\Controllers\LogViewerController;
 // Standalone UI (skip if you only embed the Blade component).
 Route::get('/', LogViewerController::class)->name('index');
 
-Route::prefix('api')->name('api.')->group(function (): void {
+// Throttle the endpoints that cost real resources: search/count can run
+// rg/grep for up to search.timeout, and a stream holds a PHP worker open.
+// Limiters are registered by the service provider (routes.rate_limits).
+// Referenced by class, so it works without the app's "throttle" alias.
+$throttleSearch = ThrottleRequests::class.':log-explorer.search';
+$throttleStream = ThrottleRequests::class.':log-explorer.stream';
+
+Route::prefix('api')->name('api.')->group(function () use ($throttleSearch, $throttleStream): void {
     Route::get('files', [LogFileController::class, 'index'])->name('files');
     Route::get('files/show', [LogFileController::class, 'show'])->name('files.show');
 
     Route::get('view', LogViewController::class)->name('view');
     Route::get('tail', LogTailController::class)->name('tail');
-    Route::get('search', LogSearchController::class)->name('search');
-    Route::get('count', LogCountController::class)->name('count');
-    Route::get('stream', LogStreamController::class)->name('stream');
+    Route::get('search', LogSearchController::class)->name('search')->middleware($throttleSearch);
+    Route::get('count', LogCountController::class)->name('count')->middleware($throttleSearch);
+    Route::get('stream', LogStreamController::class)->name('stream')->middleware($throttleStream);
+    // Download has its own per-user limit (download.rate_limit).
     Route::get('download', LogDownloadController::class)->name('download');
 });
